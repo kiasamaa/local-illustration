@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -27,13 +27,16 @@
   const STORE_META = 'meta';
   const META_INDEX = 'index';
   const META_SOURCE = 'source';
+  const META_KEYWORDS = 'keywords';
+
+  const PICK_TIMEOUT_MS = 90000;   // 选择器硬超时：到点必然结算，绝不留下悬空状态
+  const BUSY_MAX_MS = 60000;       // 导入锁最长持有时长，超时自动解锁
 
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'];
 
   const DEFAULT_SETTINGS = {
     enabled: true,          // 总开关
     tag: 'img',             // 标签名（可改成任意词防冲突）
-    wrap: 'both',           // 包裹符：both / square / fullwidth
     imgHeight: 200,         // 插图高度（像素）
     blockMode: true,        // true=块级居中，false=行内小图
     applyToUser: false,     // 是否也处理用户消息
@@ -51,6 +54,8 @@
     observer: null,
     observedEl: null,
     busy: false,
+    busySince: 0,
+    cancelPick: null,
     dirty: false,
     retryTimer: 0,
     retryCount: 0,
@@ -148,7 +153,6 @@
     // 归一化，避免脏数据/旧快照造成的异常值
     settings.enabled = !!settings.enabled;
     settings.tag = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
-    settings.wrap = ['both', 'square', 'fullwidth'].indexOf(settings.wrap) >= 0 ? settings.wrap : 'both';
     settings.imgHeight = Math.max(40, Math.min(800, Math.round(Number(settings.imgHeight) || DEFAULT_SETTINGS.imgHeight)));
     settings.blockMode = !!settings.blockMode;
     settings.applyToUser = !!settings.applyToUser;
@@ -207,6 +211,10 @@
         return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M20 11a8 8 0 1 0-2.3 5.6"/><path d="M20 5v6h-6"/></svg>';
       case 'trash':
         return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/><path d="M6.5 7l.8 11a2 2 0 0 0 2 1.9h5.4a2 2 0 0 0 2-1.9l.8-11"/></svg>';
+      case 'eye':
+        return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.7"/></svg>';
+      case 'pen':
+        return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M4 16.5V20h3.5L19 8.5 15.5 5z"/><path d="M14 6.5 17.5 10"/></svg>';
       case 'close':
         return '<svg width="18" height="18" viewBox="0 0 24 24" ' + p + '><path d="M6 6l12 12M18 6L6 18"/></svg>';
       default:
@@ -240,32 +248,24 @@
       + '        <span class="' + PREFIX + 'label">标签名（可改成任意词，防与其他插件冲突）</span>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic="tag" maxlength="16" placeholder="img" spellcheck="false" autocomplete="off">'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'row">'
-      + '        <span class="' + PREFIX + 'label">包裹符</span>'
-      + '        <div class="' + PREFIX + 'seg" data-lpic-seg="wrap">'
-      + '          <button class="' + PREFIX + 'seg-btn" data-value="both">两者都认</button>'
-      + '          <button class="' + PREFIX + 'seg-btn" data-value="square">方括号</button>'
-      + '          <button class="' + PREFIX + 'seg-btn" data-value="fullwidth">全角尖括号</button>'
-      + '        </div>'
-      + '      </div>'
       + '      <div class="' + PREFIX + 'example">当前识别：<code class="' + PREFIX + 'example-code"></code></div>'
-      + '      <div class="' + PREFIX + 'hint ' + PREFIX + 'hint-warn">半角尖括号（例如 &lt;img&gt;）会被酒馆的 HTML 清洗剥掉、识别不到，请只用上面两种包裹符。</div>'
       + '    </div>'
 
-      // —— 图片库 ——
+      // —— 关键词与图片库 ——
       + '    <div class="' + PREFIX + 'group">'
-      + '      <div class="' + PREFIX + 'group-title">图片库</div>'
+      + '      <div class="' + PREFIX + 'group-title">关键词与图片库</div>'
       + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-primary" data-lpic-act="import-dir">' + icon('folder') + '选择图片根目录</button>'
-      + '      </div>'
-      + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="import-files">' + icon('plus') + '追加图片</button>'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-primary" data-lpic-act="kw-new">' + icon('plus') + '新建关键词</button>'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="rescan">' + icon('refresh') + '重新渲染</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'status" id="' + PREFIX + 'status">尚未导入图片</div>'
-      + '      <div class="' + PREFIX + 'src" id="' + PREFIX + 'src"></div>'
-      + '      <button class="' + PREFIX + 'kw-toggle" data-lpic-act="toggle-kw">关键词清单（点一项可试看）<span id="' + PREFIX + 'kw-count">0</span></button>'
-      + '      <div class="' + PREFIX + 'kw-list" id="' + PREFIX + 'kw-list" hidden></div>'
+      + '      <div class="' + PREFIX + 'newkw" id="' + PREFIX + 'newkw" hidden>'
+      + '        <input class="' + PREFIX + 'input" type="text" data-lpic-newkw maxlength="60" spellcheck="false" autocomplete="off" placeholder="例如 挠头；多个写法写 挠头|摸摸头">'
+      + '        <button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-new-ok">创建</button>'
+      + '        <button class="' + PREFIX + 'mini-btn" data-lpic-act="kw-new-cancel">取消</button>'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'status" id="' + PREFIX + 'status"></div>'
+      + '      <div class="' + PREFIX + 'kw-head">关键词清单 <span id="' + PREFIX + 'kw-count">0</span></div>'
+      + '      <div class="' + PREFIX + 'kw-list" id="' + PREFIX + 'kw-list"></div>'
       + '    </div>'
 
       // —— 显示设置 ——
@@ -295,6 +295,17 @@
       + '        <label class="' + PREFIX + 'switch"><input type="checkbox" data-lpic="caseSensitive"><span class="' + PREFIX + 'slider"></span></label></div>'
       + '    </div>'
 
+      // —— 环境探测 ——
+      + '    <div class="' + PREFIX + 'group">'
+      + '      <div class="' + PREFIX + 'group-title">环境探测</div>'
+      + '      <div class="' + PREFIX + 'hint">想确认这台设备支持哪些导入方式？点一下生成结论，把结果复制发给开发者即可。</div>'
+      + '      <div class="' + PREFIX + 'btn-row">'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe">' + icon('refresh') + '生成探测结果</button>'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-copy">复制结果</button>'
+      + '      </div>'
+      + '      <pre class="' + PREFIX + 'probe-out" id="' + PREFIX + 'probe-out" hidden></pre>'
+      + '    </div>'
+
       // —— 底部 ——
       + '    <div class="' + PREFIX + 'group">'
       + '      <div class="' + PREFIX + 'btn-row">'
@@ -304,7 +315,7 @@
       + '      <div class="' + PREFIX + 'btn-row">'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost ' + PREFIX + 'btn-danger" data-lpic-act="clear">' + icon('trash') + '清空图片库</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">图片只保存在本机浏览器数据库里，不上传、不联网。把图片按「关键词」命名文件夹后导入，标记里写这个关键词即可。</div>'
+      + '      <div class="' + PREFIX + 'hint">图片只保存在本机浏览器数据库里，不上传、不联网。先在「关键词与图片库」里新建关键词，再点「加图」；正文里写 [img]关键词[/img]，渲染时就会变成图片，而消息文字始终没被改动。</div>'
       + '    </div>'
 
       + '  </div>'
@@ -313,7 +324,6 @@
 
   function sampleMarker() {
     const tag = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
-    if (settings.wrap === 'fullwidth') return '＜' + tag + '＞挠头＜/' + tag + '＞';
     return '[' + tag + ']挠头[/' + tag + ']';
   }
 
@@ -350,13 +360,17 @@
     panel.classList.toggle(PREFIX + 'collapsed', state.collapsed === true);
   }
 
-  /** 状态文字（导入流程会频繁调用） */
+  /** 状态文字（导入流程会频繁调用）。kind='wait' 时整条可点，用来取消等待 */
   function setStatus(text, kind) {
     const el = document.getElementById(PREFIX + 'status');
     if (!el) return;
     el.textContent = String(text == null ? '' : text);
     el.classList.toggle(PREFIX + 'status-ok', kind === 'ok');
     el.classList.toggle(PREFIX + 'status-err', kind === 'err');
+    el.classList.toggle(PREFIX + 'status-wait', kind === 'wait');
+    el.classList.toggle(PREFIX + 'status-clickable', kind === 'wait');
+    if (kind === 'wait') el.setAttribute('data-lpic-act', 'cancel-pick');
+    else el.removeAttribute('data-lpic-act');
   }
 
   function findHolder() {
@@ -510,14 +524,15 @@
         state.collapsed = !state.collapsed;
         syncUI();
         break;
-      case 'toggle-kw':
-        if (typeof toggleKeywordList === 'function') toggleKeywordList();
-        break;
-      case 'import-dir':
-        if (typeof importFlow === 'function') importFlow('replace');
-        break;
-      case 'import-files':
-        if (typeof importFlow === 'function') importFlow('append');
+      case 'cancel-pick':
+        // 自助解锁：无论选择器那边发生什么，点这一下立刻恢复可用
+        if (typeof state.cancelPick === 'function') {
+          const fn = state.cancelPick;
+          state.cancelPick = null;
+          try { fn(); } catch (e) { warn('取消等待失败', e); }
+        }
+        unlockBusy();
+        setStatus('已取消等待，可以重新点「加图」了');
         break;
       case 'clear':
         if (typeof requestClearLibrary === 'function') requestClearLibrary(btn);
@@ -544,10 +559,92 @@
   /* ======================= 四、图片库（IndexedDB） ======================= */
 
   let dbPromise = null;
-  let indexList = [];              // 轻量索引：[{ path, keyword, names, name, size }]
-  let keywordMap = new Map();      // 小写关键词 -> { name, paths: [path...] }
+  let indexList = [];              // 轻量索引：[{ path, kwId, name, size }]
+  let keywordList = [];            // 关键词（唯一权威）：[{ id, name, names, ts }]
+  let keywordMap = new Map();      // 小写写法 -> { id, name, paths: [path...] }（只用于查词）
+  let countMap = new Map();        // kwId -> 图片数（只用于展示）
+  let lastImportInfo = null;       // 最近一次导入的原始文件信息（环境探测用）
   const urlCache = new Map();      // path -> objectURL（懒加载缓存）
   const pinned = new Map();        // `${mesId}|${小写关键词}` -> path（同一消息固定同图）
+
+  /* ---- 导入锁：带时间戳，超时自愈，绝不永久卡死 ---- */
+  function isBusy() {
+    if (!state.busy) return false;
+    if (Date.now() - (state.busySince || 0) > BUSY_MAX_MS) {
+      warn('检测到残留的导入锁，已自动解锁');
+      unlockBusy();
+      return false;
+    }
+    return true;
+  }
+  function lockBusy() { state.busy = true; state.busySince = Date.now(); }
+  function unlockBusy() {
+    state.busy = false;
+    state.busySince = 0;
+    state.cancelPick = null;
+  }
+
+  /* ---- 名称与转义工具 ---- */
+  function normName(s) { return String(s == null ? '' : s).trim().replace(/\s+/g, ' '); }
+
+  function splitNames(s) {
+    return String(s == null ? '' : s).split(/[|｜,，;；]/).map(normName).filter(Boolean);
+  }
+
+  /** 主名在前、别名去重（忽略大小写重复） */
+  function uniqNames(primary, rest) {
+    const out = [primary];
+    const seen = new Set([primary.toLowerCase()]);
+    (rest || []).forEach(function (n) {
+      const k = String(n).toLowerCase();
+      if (!k || seen.has(k)) return;
+      seen.add(k);
+      out.push(n);
+    });
+    return out;
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c];
+    });
+  }
+
+  function newKeywordId() {
+    return 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
+  /** 用 id 或任意别名找关键词，返回下标（找不到 -1） */
+  function findKeywordIndex(byIdOrName) {
+    const key = normName(byIdOrName).toLowerCase();
+    if (!key) return -1;
+    for (let i = 0; i < keywordList.length; i += 1) {
+      if (String(keywordList[i].id).toLowerCase() === key) return i;
+    }
+    for (let i = 0; i < keywordList.length; i += 1) {
+      if (String(keywordList[i].name).toLowerCase() === key) return i;
+    }
+    for (let i = 0; i < keywordList.length; i += 1) {
+      const names = keywordList[i].names || [];
+      for (let j = 0; j < names.length; j += 1) {
+        if (normName(names[j]).toLowerCase() === key) return i;
+      }
+    }
+    return -1;
+  }
+
+  function getKeyword(byIdOrName) {
+    const i = findKeywordIndex(byIdOrName);
+    return i < 0 ? null : keywordList[i];
+  }
+
+  function pathsOfKeyword(id) {
+    const out = [];
+    for (let i = 0; i < indexList.length; i += 1) {
+      if (indexList[i] && indexList[i].kwId === id) out.push(indexList[i].path);
+    }
+    return out;
+  }
 
   function openDB() {
     if (dbPromise) return dbPromise;
@@ -629,6 +726,27 @@
     });
   }
 
+  function dbDelete(store, keys) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve) {
+        if (!db || !keys || !keys.length) { resolve(0); return; }
+        try {
+          const tx = db.transaction(store, 'readwrite');
+          const os = tx.objectStore(store);
+          for (let i = 0; i < keys.length; i += 1) {
+            try { os.delete(keys[i]); } catch (e) { warn('删除单条失败', e); }
+          }
+          tx.oncomplete = function () { resolve(keys.length); };
+          tx.onerror = function () { resolve(0); };
+          tx.onabort = function () { resolve(0); };
+        } catch (e) {
+          warn('删除异常', e);
+          resolve(0);
+        }
+      });
+    });
+  }
+
   /** 取图片对象 URL：命中缓存直接返回，否则从库里读 Blob 现造 */
   function getUrl(path) {
     if (!path) return Promise.resolve(null);
@@ -674,48 +792,26 @@
     }
   }
 
-  /** 从文件名猜关键词：取第一个分隔符之前的部分（挠头_01.png → 挠头） */
-  function namePrefix(name) {
-    const base = String(name || '').replace(/\.[^.]+$/, '').trim();
-    if (!base) return '';
-    const m = base.match(/^(.+?)[\s_\-.#（(．]+/);
-    return (m && m[1] ? m[1] : base).trim();
-  }
-
-  /** 打开系统选择器；isDir=true 时尝试目录模式（安卓可能不支持，会走多选兜底） */
-  function pickWithInput(isDir) {
+  /** 打开系统选择器（只做多选图片）。
+   *  无论成功 / 取消 / 超时 / 异常，Promise 都一定会结算，绝不留下悬空的等待状态。 */
+  function pickWithInput() {
     return new Promise(function (resolve) {
       let input = null;
-      try {
-        input = document.createElement('input');
-        input.type = 'file';
-        input.multiple = true;
-        input.accept = 'image/*';
-        if (isDir) {
-          input.webkitdirectory = true;
-          input.setAttribute('webkitdirectory', '');
-          input.setAttribute('directory', '');
-        }
-        input.style.position = 'fixed';
-        input.style.left = '-9999px';
-        input.style.top = '0';
-        input.style.width = '1px';
-        input.style.height = '1px';
-        input.style.opacity = '0';
-        document.body.appendChild(input);
-      } catch (e) {
-        warn('创建选择器失败', e);
-        resolve([]);
-        return;
+      let settled = false;
+      let hardTimer = 0;
+      let verifyTimer = 0;
+      let visHandler = null;
+      let focusHandler = null;
+
+      function cleanup() {
+        if (hardTimer) { clearTimeout(hardTimer); hardTimer = 0; }
+        if (verifyTimer) { clearTimeout(verifyTimer); verifyTimer = 0; }
+        try { if (visHandler) document.removeEventListener('visibilitychange', visHandler); } catch (e) { /* ignore */ }
+        try { if (focusHandler) window.removeEventListener('focus', focusHandler); } catch (e) { /* ignore */ }
+        try { if (input && input.parentNode) input.remove(); } catch (e) { /* ignore */ }
+        if (state.cancelPick === cancelFn) state.cancelPick = null;
       }
 
-      let settled = false;
-      function finish(list) {
-        if (settled) return;
-        settled = true;
-        try { input.remove(); } catch (e) { /* ignore */ }
-        resolve(list || []);
-      }
       function collect() {
         try {
           return Array.prototype.slice.call(input.files || []).filter(isImageFile);
@@ -724,36 +820,99 @@
         }
       }
 
-      input.addEventListener('change', function () { finish(collect()); });
-      input.addEventListener('cancel', function () { finish([]); });
+      function finish(list, reason) {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        log('选择器结算（' + (reason || 'done') + '），文件数 ' + ((list || []).length));
+        resolve(list || []);
+      }
 
-      // 用户在部分壳里取消时既没有 change 也没有 cancel，用「焦点回到页面」兜底
-      window.addEventListener('focus', function onFocus() {
-        window.removeEventListener('focus', onFocus);
-        setTimeout(function () {
+      // 用户点了状态条上的「取消等待」
+      const cancelFn = function () { finish(collect(), 'user-cancel'); };
+      state.cancelPick = cancelFn;
+
+      // 页面重新可见（安卓 WebView 打开选择器时会隐藏页面，这比 focus 可靠）→ 延迟复查
+      function scheduleVerify(delay) {
+        if (settled || verifyTimer) return;
+        verifyTimer = setTimeout(function () {
+          verifyTimer = 0;
           if (settled) return;
-          finish(collect());
-        }, 3000);
-      }, { once: true });
+          const got = collect();
+          if (got.length) { finish(got, 'verify'); return; }
+          // 有的设备把结果送回来更晚，再给一次机会
+          verifyTimer = setTimeout(function () {
+            verifyTimer = 0;
+            if (settled) return;
+            finish(collect(), 'verify-late');
+          }, 1400);
+        }, delay);
+      }
 
-      try { input.click(); } catch (e) { finish([]); }
+      visHandler = function () {
+        if (settled) return;
+        if (document.visibilityState !== 'visible') return;
+        scheduleVerify(900);
+      };
+      focusHandler = function () {
+        if (settled) return;
+        scheduleVerify(1500);
+      };
+
+      try {
+        input = document.createElement('input');
+        input.type = 'file';
+        input.multiple = true;
+        input.accept = 'image/*';
+        input.style.position = 'fixed';
+        input.style.left = '-9999px';
+        input.style.top = '0';
+        input.style.width = '1px';
+        input.style.height = '1px';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+
+        input.addEventListener('change', function () { finish(collect(), 'change'); });
+        input.addEventListener('cancel', function () { finish([], 'cancel'); });
+        try { document.addEventListener('visibilitychange', visHandler); } catch (e) { /* ignore */ }
+        try { window.addEventListener('focus', focusHandler); } catch (e) { /* ignore */ }
+
+        // 硬超时兜底：所有侦测都失效时也不会永久悬空
+        hardTimer = setTimeout(function () {
+          hardTimer = 0;
+          finish(collect(), 'timeout');
+        }, PICK_TIMEOUT_MS);
+
+        input.click();
+      } catch (e) {
+        warn('打开选择器失败', e);
+        finish([], 'error');
+      }
     });
   }
 
+  /** 建查询表：关键词由用户定义（权威），图片挂在 keywordList 的 id 上 */
   function buildIndex() {
     keywordMap = new Map();
+    countMap = new Map();
+    const byId = new Map();
+    for (let i = 0; i < keywordList.length; i += 1) byId.set(keywordList[i].id, keywordList[i]);
+
     for (let i = 0; i < indexList.length; i += 1) {
       const rec = indexList[i];
       if (!rec || !rec.path) continue;
-      const names = [rec.keyword].concat(rec.names || []);
+      const k = byId.get(rec.kwId);
+      if (!k) continue;                         // 挂在已删除关键词上的记录，忽略
+      countMap.set(rec.kwId, (countMap.get(rec.kwId) || 0) + 1);
+      const names = (k.names && k.names.length) ? k.names : [k.name];
       for (let j = 0; j < names.length; j += 1) {
-        const nm = String(names[j] == null ? '' : names[j]).trim();
+        const nm = normName(names[j]);
         if (!nm) continue;
-        const k = nm.toLowerCase();
-        let entry = keywordMap.get(k);
+        const key = nm.toLowerCase();
+        let entry = keywordMap.get(key);
         if (!entry) {
-          entry = { name: nm, paths: [] };
-          keywordMap.set(k, entry);
+          entry = { id: k.id, name: k.name, paths: [] };
+          keywordMap.set(key, entry);
         }
         if (entry.paths.indexOf(rec.path) < 0) entry.paths.push(rec.path);
       }
@@ -785,161 +944,217 @@
     return path;
   }
 
-  async function doImport(files, mode) {
+  function yieldToUI() {
+    return new Promise(function (r) { setTimeout(r, 0); });
+  }
+
+  function saveIndex() {
+    return dbPut(STORE_META, [{ key: META_INDEX, list: indexList }]);
+  }
+
+  function saveKeywords() {
+    return dbPut(STORE_META, [{ key: META_KEYWORDS, list: keywordList }]);
+  }
+
+  /** 图片库变了以后：先把画面还原成原文，再清缓存并重新渲染 */
+  function afterLibraryChanged() {
+    try {
+      revertRendered();
+      revokeUrls();
+      pinned.clear();
+      buildIndex();
+      updateStats();
+      applyAll();
+    } catch (e) {
+      warn('刷新画面失败', e);
+    }
+  }
+
+  /** 把一批图片全部导入到指定关键词名下 */
+  async function doImport(files, keywordIdOrName) {
+    const kw = getKeyword(keywordIdOrName);
+    if (!kw) {
+      setStatus('找不到关键词，请先「新建关键词」再导入图片', 'err');
+      return 0;
+    }
+
     const total = files.length;
+    const now = Date.now();
     const records = [];
     const list = [];
     const used = new Set();
-    const now = Date.now();
-    let rootName = '';
+    for (let i = 0; i < indexList.length; i += 1) used.add(indexList[i].path);
+
+    const prefix = 'k/' + kw.id + '/';
 
     for (let i = 0; i < total; i += 1) {
       const f = files[i];
-      const rel = String(f.webkitRelativePath || f.name || '').replace(/\\/g, '/');
-      const parts = rel.split('/').filter(Boolean);
-      let relFromRoot = rel;
-      let kwSource = '';
-
-      if (parts.length >= 2) {
-        if (!rootName) rootName = parts[0];
-        const inner = parts.slice(1);
-        relFromRoot = inner.join('/');
-        kwSource = inner.length >= 2 ? inner[inner.length - 2] : namePrefix(inner[inner.length - 1]);
-      } else {
-        relFromRoot = parts[0] || f.name;
-        kwSource = namePrefix(f.name);
-      }
-
-      const kwRaw = String(kwSource || '').trim();
-      if (!kwRaw) continue;
-
-      const names = kwRaw.split(/[|｜,，;；]/).map(function (s) { return s.trim(); }).filter(Boolean);
-      const primary = names[0] || kwRaw;
-
-      let path = relFromRoot || f.name;
+      const fname = String(f.name || ('image' + i));
+      let path = prefix + fname;
       let n = 1;
-      while (used.has(path)) { n += 1; path = (relFromRoot || f.name) + '#' + n; }
+      while (used.has(path)) { n += 1; path = prefix + n + '_' + fname; }
       used.add(path);
 
       records.push({
         path: path,
-        keyword: primary,
-        names: names,
-        name: f.name,
+        kwId: kw.id,
+        name: fname,
         type: f.type || '',
         size: f.size || 0,
         ts: now,
         blob: f,
       });
-      list.push({ path: path, keyword: primary, names: names, name: f.name, size: f.size || 0 });
+      list.push({ path: path, kwId: kw.id, name: fname, size: f.size || 0 });
 
       if (i % 25 === 0) {
-        setStatus('正在读取图片 ' + (i + 1) + ' / ' + total + ' …');
-        await new Promise(function (r) { setTimeout(r, 0); });
+        setStatus('正在读取图片 ' + (i + 1) + ' / ' + total + ' …', 'wait');
+        await yieldToUI();
       }
     }
 
     if (!records.length) {
       setStatus('没有读到可用的图片（支持 png / jpg / gif / webp / avif / bmp / svg）', 'err');
-      return;
-    }
-
-    if (mode === 'replace') {
-      await dbClear(STORE_FILES);
-      setStatus('正在清空旧图片库 …');
+      return 0;
     }
 
     const CHUNK = 80;
     for (let i = 0; i < records.length; i += CHUNK) {
       await dbPut(STORE_FILES, records.slice(i, i + CHUNK));
-      setStatus('正在入库 ' + Math.min(i + CHUNK, records.length) + ' / ' + records.length + ' …');
-      await new Promise(function (r) { setTimeout(r, 0); });
+      setStatus('正在入库 ' + Math.min(i + CHUNK, records.length) + ' / ' + records.length + ' …', 'wait');
+      await yieldToUI();
     }
 
-    let merged = list;
-    if (mode === 'append') {
-      const old = await dbGet(STORE_META, META_INDEX);
-      const oldList = (old && Array.isArray(old.list)) ? old.list : [];
-      const newPaths = new Set(list.map(function (r) { return r.path; }));
-      merged = oldList.filter(function (r) { return !newPaths.has(r.path); }).concat(list);
-    }
-
-    await dbPut(STORE_META, [{ key: META_INDEX, list: merged }]);
+    indexList = indexList.concat(list);
+    await saveIndex();
     await dbPut(STORE_META, [{
       key: META_SOURCE,
-      info: { rootName: rootName || '（直接选择的图片文件）', count: merged.length, ts: now },
+      info: { kw: kw.name, count: list.length, total: indexList.length, ts: now },
     }]);
 
-    indexList = merged;
-    buildIndex();
-
-    // 库变了：先把画面上的旧图还原成原文，再清缓存、重新渲染
-    if (typeof revertRendered === 'function') revertRendered();
-    revokeUrls();
-    pinned.clear();
-    updateStats();
-    if (typeof applyAll === 'function') applyAll();
-    log('导入完成', list.length, '张，库内共', merged.length, '张');
+    afterLibraryChanged();
+    log('导入完成：', kw.name, list.length, '张，库内共', indexList.length, '张');
+    return list.length;
   }
 
-  async function importFlow(mode, forceFiles) {
-    if (state.busy) { log('导入进行中，忽略本次请求'); return; }
-    state.busy = true;
+  /** 唯一导入入口：先有目标关键词，再多选图片 */
+  async function importFlow(keywordIdOrName) {
+    const kw = getKeyword(keywordIdOrName);
+    if (!kw) { setStatus('请先「新建关键词」，再点它的「加图」按钮', 'err'); return; }
+    if (isBusy()) {
+      setStatus('上一次导入还没结束，点这里可以取消等待', 'wait');
+      return;
+    }
+
+    lockBusy();
     try {
-      let files = [];
-      if (!forceFiles) {
-        setStatus('请在弹窗里选中你的「图片根目录」…');
-        files = await pickWithInput(true);
-      }
-      if (!files.length) {
-        if (!forceFiles) setStatus('没读到文件夹（部分安卓设备不支持选文件夹），改为多选图片…');
-        files = await pickWithInput(false);
-      }
+      setStatus('正在等待你选图片…（点这里取消等待）', 'wait');
+      const files = await pickWithInput();
+
+      // 留一份原始信息给「环境探测」，便于判断设备能力
+      lastImportInfo = {
+        at: Date.now(),
+        count: files.length,
+        samples: files.slice(0, 5).map(function (f) {
+          return {
+            name: String(f.name || ''),
+            type: String(f.type || ''),
+            size: Number(f.size) || 0,
+            rel: String(f.webkitRelativePath || ''),
+          };
+        }),
+      };
+
       if (!files.length) {
         setStatus('已取消，没有导入任何图片');
         return;
       }
-      await doImport(files, mode);
+
+      const added = await doImport(files, kw.id);
+      if (added) {
+        setStatus('已把 ' + added + ' 张图片导入「' + kw.name + '」 · 共 '
+          + keywordList.length + ' 个关键词 / ' + indexList.length + ' 张图', 'ok');
+      }
     } catch (e) {
       warn('导入失败', e);
       setStatus('导入失败：' + (e && e.message ? e.message : e), 'err');
     } finally {
-      state.busy = false;
+      unlockBusy();
     }
   }
 
+  /** 启动时载入：关键词 + 图片索引，并顺手做一次旧数据自愈迁移 */
   async function refreshLibrary() {
     try {
+      const kwRec = await dbGet(STORE_META, META_KEYWORDS);
+      keywordList = (kwRec && Array.isArray(kwRec.list))
+        ? kwRec.list.filter(function (k) { return k && k.id && k.name; })
+        : [];
+
       const rec = await dbGet(STORE_META, META_INDEX);
       indexList = (rec && Array.isArray(rec.list)) ? rec.list : [];
+
+      await migrateLegacyIndex();
+
       buildIndex();
       updateStats();
-
-      const src = await dbGet(STORE_META, META_SOURCE);
-      const srcEl = document.getElementById(PREFIX + 'src');
-      if (srcEl) {
-        const info = (src && src.info) || null;
-        srcEl.textContent = (info && info.ts)
-          ? ('来源：' + info.rootName + ' · 导入于 ' + new Date(info.ts).toLocaleString())
-          : '';
-      }
-      if (typeof applyAll === 'function') applyAll();
-      log('图片库已就绪，共', indexList.length, '张');
+      applyAll();
+      log('图片库已就绪：', keywordList.length, '个关键词 /', indexList.length, '张图');
     } catch (e) {
       warn('读取图片库失败', e);
     }
   }
 
+  /** v1.0.0 的索引没有 kwId（关键词来自文件夹名）→ 就地自愈成新模型 */
+  async function migrateLegacyIndex() {
+    let changed = false;
+    const byName = new Map();
+    const byId = new Map();
+    for (let i = 0; i < keywordList.length; i += 1) {
+      byName.set(String(keywordList[i].name).toLowerCase(), keywordList[i]);
+      byId.set(keywordList[i].id, keywordList[i]);
+    }
+
+    for (let i = 0; i < indexList.length; i += 1) {
+      const it = indexList[i];
+      if (!it || !it.path) continue;
+      if (it.kwId && byId.has(it.kwId)) continue;      // 已是新模型
+
+      const legacyName = normName(it.keyword || '未命名') || '未命名';
+      let target = byName.get(legacyName.toLowerCase());
+      if (!target) {
+        const extra = (it.names || []).map(normName).filter(Boolean);
+        target = {
+          id: newKeywordId(),
+          name: legacyName,
+          names: uniqNames(legacyName, extra),
+          ts: Date.now(),
+        };
+        keywordList.push(target);
+        byName.set(legacyName.toLowerCase(), target);
+        byId.set(target.id, target);
+      }
+      it.kwId = target.id;
+      changed = true;
+    }
+
+    if (changed) {
+      await saveKeywords();
+      await saveIndex();
+      log('已把旧版图片数据迁移到新的关键词模型');
+    }
+  }
+
   function updateStats() {
     const total = indexList.length;
-    if (!total) {
-      setStatus('尚未导入图片');
+    const kwCount = keywordList.length;
+    if (!total && !kwCount) {
+      setStatus('还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图」按钮导入图片');
       renderKeywordList();
       return;
     }
     let bytes = 0;
     for (let i = 0; i < indexList.length; i += 1) bytes += Number(indexList[i].size) || 0;
-    setStatus('已就绪：' + keywordMap.size + ' 个关键词 · ' + total + ' 张图片 · 占用 ' + fmtSize(bytes), 'ok');
+    setStatus('已就绪：' + kwCount + ' 个关键词 · ' + total + ' 张图片 · 占用 ' + fmtSize(bytes), 'ok');
     renderKeywordList();
   }
 
@@ -948,30 +1163,231 @@
     const countEl = document.getElementById(PREFIX + 'kw-count');
     if (!listEl) return;
 
-    const items = Array.from(keywordMap.values()).sort(function (a, b) {
-      return String(a.name).localeCompare(String(b.name), 'zh-Hans-CN');
-    });
-    if (countEl) countEl.textContent = String(items.length);
-    if (!items.length) {
-      listEl.innerHTML = '<div class="' + PREFIX + 'kw-empty">还没有关键词。把图片按关键词命名文件夹（或用「关键词_01.png」这样命名）后导入即可。</div>';
+    if (countEl) countEl.textContent = String(keywordList.length);
+    if (!keywordList.length) {
+      listEl.innerHTML = '<div class="' + PREFIX + 'kw-empty">还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图」按钮导入图片。</div>';
       return;
     }
-    listEl.innerHTML = items.map(function (it) {
-      const safe = String(it.name).replace(/[&<>"]/g, function (c) {
-        return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c];
-      });
-      return '<button class="' + PREFIX + 'kw-item" data-lpic-act="kw-preview" data-kw="' + safe + '">'
-        + '<span class="' + PREFIX + 'kw-name">' + safe + '</span>'
-        + '<span class="' + PREFIX + 'kw-num">' + it.paths.length + '</span>'
-        + '</button>';
+
+    listEl.innerHTML = keywordList.map(function (k) {
+      const n = countMap.get(k.id) || 0;
+      const id = esc(k.id);
+      const alias = (k.names && k.names.length > 1)
+        ? '<span class="' + PREFIX + 'kw-alias">也认：' + k.names.slice(1).map(esc).join(' / ') + '</span>'
+        : '';
+      return '<div class="' + PREFIX + 'kw-row" data-kw-id="' + id + '">'
+        + '<div class="' + PREFIX + 'kw-main">'
+        + '<span class="' + PREFIX + 'kw-name">' + esc(k.name) + '</span>'
+        + '<span class="' + PREFIX + 'kw-num">' + n + ' 张</span>'
+        + alias
+        + '</div>'
+        + '<div class="' + PREFIX + 'kw-acts">'
+        + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-add" data-kw-id="' + id + '">' + icon('plus') + '加图</button>'
+        + (n ? '<button class="' + PREFIX + 'icon-btn" title="试看一张" data-lpic-act="kw-preview" data-kw-id="' + id + '">' + icon('eye') + '</button>' : '')
+        + '<button class="' + PREFIX + 'icon-btn" title="改名" data-lpic-act="kw-rename" data-kw-id="' + id + '">' + icon('pen') + '</button>'
+        + '<button class="' + PREFIX + 'icon-btn ' + PREFIX + 'icon-danger" title="删除" data-lpic-act="kw-del" data-kw-id="' + id + '">' + icon('trash') + '</button>'
+        + '</div>'
+        + '<div class="' + PREFIX + 'kw-edit" hidden>'
+        + '<input class="' + PREFIX + 'input" type="text" data-lpic-kwedit maxlength="60" spellcheck="false" autocomplete="off" placeholder="关键词；多个写法用 | 分隔">'
+        + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-rename-ok" data-kw-id="' + id + '">确定</button>'
+        + '<button class="' + PREFIX + 'mini-btn" data-lpic-act="kw-edit-cancel" data-kw-id="' + id + '">取消</button>'
+        + '</div>'
+        + '<div class="' + PREFIX + 'kw-confirm" hidden></div>'
+        + '</div>';
     }).join('');
   }
 
-  function toggleKeywordList() {
-    const listEl = document.getElementById(PREFIX + 'kw-list');
-    if (!listEl) return;
-    listEl.hidden = !listEl.hidden;
-    if (!listEl.hidden) renderKeywordList();
+  /* ---- 关键词：新建 / 改名 / 删除 / 合并 ---- */
+
+  function kwRow(id) {
+    try {
+      return document.querySelector('.' + PREFIX + 'kw-row[data-kw-id="' + String(id).replace(/"/g, '') + '"]');
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function closeRowPanels(id) {
+    const row = kwRow(id);
+    if (!row) return;
+    const edit = row.querySelector('.' + PREFIX + 'kw-edit');
+    const conf = row.querySelector('.' + PREFIX + 'kw-confirm');
+    if (edit) edit.hidden = true;
+    if (conf) { conf.hidden = true; conf.innerHTML = ''; }
+  }
+
+  function openNewKeywordRow() {
+    const box = document.getElementById(PREFIX + 'newkw');
+    if (!box) return;
+    box.hidden = false;
+    const input = box.querySelector('[data-lpic-newkw]');
+    if (input) {
+      input.value = '';
+      try { input.focus(); } catch (e) { /* ignore */ }
+    }
+  }
+
+  function closeNewKeywordRow() {
+    const box = document.getElementById(PREFIX + 'newkw');
+    if (box) box.hidden = true;
+  }
+
+  /** 新建关键词（纯逻辑；返回 { ok, keyword, reason }） */
+  async function createKeyword(rawNames) {
+    const names = splitNames(rawNames);
+    if (!names.length) return { ok: false, reason: '关键词不能是空的，先给它起个名字' };
+    const primary = names[0];
+    if (findKeywordIndex(primary) >= 0) return { ok: false, reason: '已经有「' + primary + '」这个关键词了' };
+    const rec = {
+      id: newKeywordId(),
+      name: primary,
+      names: uniqNames(primary, names.slice(1)),
+      ts: Date.now(),
+    };
+    keywordList.push(rec);
+    await saveKeywords();
+    buildIndex();
+    updateStats();
+    return { ok: true, keyword: rec };
+  }
+
+  async function createKeywordFromUI() {
+    const box = document.getElementById(PREFIX + 'newkw');
+    const input = box ? box.querySelector('[data-lpic-newkw]') : null;
+    const res = await createKeyword(input ? input.value : '');
+    if (!res.ok) { setStatus(res.reason, 'err'); return; }
+    if (input) input.value = '';
+    closeNewKeywordRow();
+    setStatus('已新建关键词「' + res.keyword.name + '」，点它的「加图」按钮就能往里面加图片', 'ok');
+  }
+
+  function openRenameRow(id) {
+    const row = kwRow(id);
+    if (!row) return;
+    const k = getKeyword(id);
+    const edit = row.querySelector('.' + PREFIX + 'kw-edit');
+    const input = edit ? edit.querySelector('[data-lpic-kwedit]') : null;
+    if (!edit || !input) return;
+    input.value = k ? (k.names && k.names.length ? k.names.join('|') : k.name) : '';
+    edit.hidden = false;
+    try { input.focus(); } catch (e) { /* ignore */ }
+  }
+
+  /** 改名（纯逻辑）。若改成一个已存在的名字，则直接合并过去，避免出现重名 */
+  async function renameKeyword(id, rawNames) {
+    const k = getKeyword(id);
+    if (!k) return { ok: false, reason: '这个关键词已经不在了' };
+    const names = splitNames(rawNames);
+    if (!names.length) return { ok: false, reason: '关键词不能是空的' };
+
+    const primary = names[0];
+    const otherIdx = findKeywordIndex(primary);
+    if (otherIdx >= 0 && keywordList[otherIdx].id !== k.id) {
+      const target = keywordList[otherIdx];
+      await mergeKeywordInto(k.id, target.id);
+      return { ok: true, merged: true, keyword: target, before: k.name };
+    }
+
+    const before = k.name;
+    k.name = primary;
+    k.names = uniqNames(primary, names.slice(1));
+    await saveKeywords();
+    buildIndex();
+    updateStats();
+    rebuildRendered(false);
+    return { ok: true, keyword: k, before: before };
+  }
+
+  async function confirmRename(id) {
+    const row = kwRow(id);
+    const input = row ? row.querySelector('[data-lpic-kwedit]') : null;
+    const res = await renameKeyword(id, input ? input.value : '');
+    if (!res.ok) { setStatus(res.reason, 'err'); return; }
+    if (res.merged) return;                    // 合并流程里已经给过提示了
+    closeRowPanels(res.keyword.id);
+    setStatus('已把「' + res.before + '」改名为「' + res.keyword.name + '」', 'ok');
+  }
+
+  function openDeleteConfirm(id) {
+    const row = kwRow(id);
+    const k = getKeyword(id);
+    if (!row || !k) return;
+    const box = row.querySelector('.' + PREFIX + 'kw-confirm');
+    if (!box) return;
+
+    const n = countMap.get(k.id) || 0;
+    const others = keywordList.filter(function (x) { return x.id !== k.id; });
+    const idAttr = esc(k.id);
+
+    let html = '<span class="' + PREFIX + 'confirm-text">'
+      + (n ? ('「' + esc(k.name) + '」下面有 ' + n + ' 张图，你想怎么处理？')
+        : ('删除空关键词「' + esc(k.name) + '」？'))
+      + '</span><div class="' + PREFIX + 'confirm-acts">';
+
+    if (n) {
+      html += '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-danger" data-lpic-act="kw-del-all" data-kw-id="' + idAttr + '">连图一起删</button>';
+      if (others.length) {
+        html += '<select class="' + PREFIX + 'select" data-lpic-merge>'
+          + others.map(function (o) { return '<option value="' + esc(o.id) + '">' + esc(o.name) + '</option>'; }).join('')
+          + '</select>'
+          + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-merge" data-kw-id="' + idAttr + '">合并过去</button>';
+      }
+    } else {
+      html += '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-danger" data-lpic-act="kw-del-all" data-kw-id="' + idAttr + '">确认删除</button>';
+    }
+    html += '<button class="' + PREFIX + 'mini-btn" data-lpic-act="kw-edit-cancel" data-kw-id="' + idAttr + '">取消</button></div>';
+
+    box.innerHTML = html;
+    box.hidden = false;
+  }
+
+  async function deleteKeyword(id) {
+    const k = getKeyword(id);
+    if (!k) return;
+    try {
+      const paths = pathsOfKeyword(k.id);
+      if (paths.length) {
+        const CHUNK = 80;
+        for (let i = 0; i < paths.length; i += CHUNK) {
+          await dbDelete(STORE_FILES, paths.slice(i, i + CHUNK));
+          setStatus('正在删除图片 ' + Math.min(i + CHUNK, paths.length) + ' / ' + paths.length + ' …', 'wait');
+          await yieldToUI();
+        }
+        const gone = new Set(paths);
+        indexList = indexList.filter(function (r) { return !gone.has(r.path); });
+        await saveIndex();
+      }
+      keywordList = keywordList.filter(function (x) { return x.id !== k.id; });
+      await saveKeywords();
+      afterLibraryChanged();
+      setStatus('已删除关键词「' + k.name + '」' + (paths.length ? '，连同它的 ' + paths.length + ' 张图片' : ''), 'ok');
+    } catch (e) {
+      warn('删除关键词失败', e);
+      setStatus('删除失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+
+  async function mergeKeywordInto(fromId, toId) {
+    const from = getKeyword(fromId);
+    const to = getKeyword(toId);
+    if (!from || !to || from.id === to.id) return;
+    try {
+      let moved = 0;
+      for (let i = 0; i < indexList.length; i += 1) {
+        if (indexList[i] && indexList[i].kwId === from.id) {
+          indexList[i].kwId = to.id;   // 图片记录只认 kwId，改一处即可
+          moved += 1;
+        }
+      }
+      if (moved) await saveIndex();
+      keywordList = keywordList.filter(function (x) { return x.id !== from.id; });
+      await saveKeywords();
+      afterLibraryChanged();
+      setStatus('已把「' + from.name + '」的 ' + moved + ' 张图并到「' + to.name + '」，并删除「' + from.name + '」', 'ok');
+    } catch (e) {
+      warn('合并关键词失败', e);
+      setStatus('合并失败：' + (e && e.message ? e.message : e), 'err');
+    }
   }
 
   function requestClearLibrary(btn) {
@@ -1002,17 +1418,16 @@
 
   async function clearLibrary() {
     try {
-      if (typeof revertRendered === 'function') revertRendered();
+      revertRendered();
       revokeUrls();
       pinned.clear();
       await dbClear(STORE_FILES);
       await dbClear(STORE_META);
       indexList = [];
+      keywordList = [];
       buildIndex();
-      const srcEl = document.getElementById(PREFIX + 'src');
-      if (srcEl) srcEl.textContent = '';
       updateStats();
-      setStatus('图片库已清空', 'ok');
+      setStatus('已清空：关键词和图片都不再记录（原始图片文件不会被删）', 'ok');
       log('图片库已清空');
     } catch (e) {
       warn('清空图片库失败', e);
@@ -1031,16 +1446,10 @@
     return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
-  /** 按「标签名 + 包裹符」现建正则（每次新建，避免 /g 的 lastIndex 陷阱） */
+  /** 按标签名现建正则（每次新建，避免 /g 的 lastIndex 陷阱）。只认方括号写法 */
   function buildRegex() {
     const tag = escapeRe(clampTag(settings.tag) || DEFAULT_SETTINGS.tag);
-    const sq = '\\[\\s*' + tag + '\\s*\\]([^\\n]{1,60}?)\\[\\s*\\/\\s*' + tag + '\\s*\\]';
-    const fw = '[＜〈]\\s*' + tag + '\\s*[＞〉]([^\\n]{1,60}?)[＜〈]\\s*\\/\\s*' + tag + '\\s*[＞〉]';
-    let src;
-    if (settings.wrap === 'square') src = sq;
-    else if (settings.wrap === 'fullwidth') src = fw;
-    else src = sq + '|' + fw;
-    return new RegExp(src, 'g');
+    return new RegExp('\\[\\s*' + tag + '\\s*\\]([^\\n]{1,60}?)\\[\\s*\\/\\s*' + tag + '\\s*\\]', 'g');
   }
 
   function getMesId(mesEl) {
@@ -1163,7 +1572,7 @@
 
     for (let i = 0; i < matches.length; i += 1) {
       const m = matches[i];
-      const kwRaw = (m[1] !== undefined) ? m[1] : ((m[2] !== undefined) ? m[2] : '');
+      const kwRaw = (m[1] !== undefined) ? m[1] : '';
       const kw = String(kwRaw).trim();
       const entry = lookupKeyword(kw);
       if (!entry) continue;                       // 没有对应图片目录 → 原样保留
@@ -1457,29 +1866,144 @@
     }
   }
 
-  function previewKeyword(kw) {
-    const entry = lookupKeyword(kw);
-    if (!entry || !entry.paths.length) {
-      setStatus('关键词「' + kw + '」没有可用图片', 'err');
-      return;
-    }
-    const path = entry.paths[Math.floor(Math.random() * entry.paths.length)];
+  function previewKeywordById(id) {
+    const k = getKeyword(id);
+    if (!k) { setStatus('这个关键词已经不在了', 'err'); return; }
+    const paths = pathsOfKeyword(k.id);
+    if (!paths.length) { setStatus('「' + k.name + '」下面还没有图片，点「加图」加几张吧', 'err'); return; }
+    const path = paths[Math.floor(Math.random() * paths.length)];
     getUrl(path).then(function (url) {
-      if (url) openLightbox(url, kw);
+      if (url) openLightbox(url, k.name);
       else setStatus('图片读取失败：' + path, 'err');
     });
   }
 
+  /** 合并的目标关键词取自同一确认条里的下拉框 */
+  async function mergeKeywordFromRow(fromId, btn) {
+    const row = kwRow(fromId);
+    const sel = row ? row.querySelector('[data-lpic-merge]') : null;
+    const toId = sel ? sel.value : '';
+    if (!toId) { setStatus('没有可合并的目标关键词', 'err'); return; }
+    await mergeKeywordInto(fromId, toId);
+  }
+
   function handleExtraAct(act, btn) {
+    const id = btn ? (btn.getAttribute('data-kw-id') || '') : '';
     switch (act) {
-      case 'kw-preview':
-        previewKeyword(btn ? (btn.getAttribute('data-kw') || '') : '');
-        break;
-      case 'lb-close':
-        closeLightbox();
-        break;
-      default:
-        break;
+      case 'kw-new': openNewKeywordRow(); break;
+      case 'kw-new-cancel': closeNewKeywordRow(); break;
+      case 'kw-new-ok': createKeywordFromUI(); break;
+      case 'kw-add': importFlow(id); break;
+      case 'kw-preview': previewKeywordById(id); break;
+      case 'kw-rename': openRenameRow(id); break;
+      case 'kw-rename-ok': confirmRename(id); break;
+      case 'kw-edit-cancel': closeRowPanels(id); break;
+      case 'kw-del': openDeleteConfirm(id); break;
+      case 'kw-del-all': deleteKeyword(id); break;
+      case 'kw-merge': mergeKeywordFromRow(id, btn); break;
+      case 'probe': runEnvProbe(); break;
+      case 'probe-copy': copyProbeResult(); break;
+      case 'lb-close': closeLightbox(); break;
+      default: break;
+    }
+  }
+
+  /* ---- 环境探测：用大白话回答「这台设备到底能不能选文件夹」 ---- */
+
+  let probeText = '';
+
+  function runEnvProbe() {
+    const ua = String((window.navigator && window.navigator.userAgent) || '');
+    const isAndroid = /Android/i.test(ua);
+    const hasTauri = !!window.__TAURI__;
+    const tauriFs = !!(window.__TAURI__ && window.__TAURI__.fs && typeof window.__TAURI__.fs.readDir === 'function');
+    const tauriInvoke = !!(window.__TAURI_INTERNALS__ && typeof window.__TAURI_INTERNALS__.invoke === 'function');
+    const dirPicker = (typeof window.showDirectoryPicker === 'function');
+    const dirAttr = (function () {
+      try { return ('webkitdirectory' in document.createElement('input')); } catch (e) { return false; }
+    })();
+
+    const lines = [];
+    lines.push('== 本地插图 · 环境探测 ==');
+    lines.push('时间：' + new Date().toLocaleString());
+    lines.push('插件版本：v' + VERSION);
+    lines.push('平台：' + (isAndroid ? '安卓' : '非安卓'));
+    lines.push('UA：' + ua.slice(0, 160));
+    lines.push('');
+    lines.push('【能不能选文件夹】');
+    lines.push('· 网页属性 webkitdirectory：' + (dirAttr ? '存在（但安卓的系统选择器通常给不了文件夹）' : '不存在'));
+    lines.push('· showDirectoryPicker（真正的文件夹授权）：' + (dirPicker ? '支持' : '不支持'));
+    lines.push('· Tauri 目录接口 __TAURI__.fs.readDir：'
+      + (tauriFs ? '发现（有希望按路径读文件夹）' : (hasTauri ? '存在 __TAURI__ 但没有 fs.readDir' : '未发现')));
+    lines.push('· Tauri invoke：' + (tauriInvoke ? '发现' : '未发现'));
+    lines.push('· 结论：' + ((!dirPicker && !tauriFs)
+      ? '这台设备无法选择文件夹，请用「新建关键词 → 加图」的方式导入'
+      : '检测到可能可用的目录接口，请把本结果发给开发者'));
+    lines.push('');
+    lines.push('【最近一次导入拿到的原始文件信息】');
+    if (lastImportInfo && lastImportInfo.samples && lastImportInfo.samples.length) {
+      lines.push('时间：' + new Date(lastImportInfo.at).toLocaleString() + ' · 共 ' + lastImportInfo.count + ' 个文件');
+      lastImportInfo.samples.forEach(function (f, i) {
+        lines.push('· #' + (i + 1)
+          + ' 名称=' + (f.name || '(空)')
+          + ' 类型=' + (f.type || '(空)')
+          + ' 大小=' + fmtSize(f.size)
+          + ' 相对路径=' + (f.rel || '(空)'));
+      });
+      if (lastImportInfo.samples.some(function (f) { return f.rel; })) {
+        lines.push('· 注意：这批文件带有相对路径，说明目录信息其实拿得到');
+      }
+    } else {
+      lines.push('（还没导入过。先点一次「加图」随便选几张图，再来生成会更全）');
+    }
+    lines.push('');
+    lines.push('【运行环境】');
+    lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + indexList.length + ' 张');
+    lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
+    lines.push('· 酒馆事件系统可用：' + ((getEventSource() && getEventTypes()) ? '是' : '否'));
+
+    probeText = lines.join('\n');
+    const out = document.getElementById(PREFIX + 'probe-out');
+    if (out) {
+      out.textContent = probeText;
+      out.hidden = false;
+    }
+    setStatus('探测完成，结果在下方，可点「复制结果」', 'ok');
+    log('环境探测结果\n' + probeText);
+    return probeText;
+  }
+
+  function copyProbeResult() {
+    const text = probeText || '';
+    if (!text) { setStatus('还没有探测结果，先点「生成探测结果」', 'err'); return; }
+    const out = document.getElementById(PREFIX + 'probe-out');
+    let async = false;
+    try {
+      if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
+        async = true;
+        window.navigator.clipboard.writeText(text).then(function () {
+          setStatus('已复制到剪贴板，直接粘给我就行', 'ok');
+        }).catch(function () {
+          selectProbeText(out);
+        });
+      }
+    } catch (e) {
+      async = false;
+    }
+    if (!async) selectProbeText(out);
+  }
+
+  function selectProbeText(out) {
+    try {
+      if (!out) { setStatus('复制失败，请手动选中下方文字复制', 'err'); return; }
+      out.hidden = false;
+      const range = document.createRange();
+      range.selectNodeContents(out);
+      const sel = window.getSelection();
+      if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+      setStatus('系统不让自动复制，文字已帮你选中，长按手动复制即可', 'err');
+    } catch (e) {
+      setStatus('复制失败，请手动选中下方文字复制', 'err');
     }
   }
 
@@ -1605,8 +2129,23 @@
         buildRegex: buildRegex,
         lookupKeyword: lookupKeyword,
         keywords: function () {
-          return Array.from(keywordMap.values()).map(function (e) { return { name: e.name, count: e.paths.length }; });
+          return keywordList.map(function (k) {
+            return { id: k.id, name: k.name, names: k.names, count: countMap.get(k.id) || 0 };
+          });
         },
+        lookupTable: function () {
+          return Array.from(keywordMap.entries()).map(function (e) {
+            return { key: e[0], name: e[1].name, count: e[1].paths.length };
+          });
+        },
+        createKeyword: createKeyword,
+        renameKeyword: renameKeyword,
+        deleteKeyword: deleteKeyword,
+        mergeKeyword: mergeKeywordInto,
+        importFiles: doImport,
+        probe: runEnvProbe,
+        lastImport: function () { return lastImportInfo; },
+        busy: function () { return { busy: state.busy, since: state.busySince, waiting: !!state.cancelPick }; },
         pinned: function () { return Array.from(pinned.entries()); },
         urls: function () { return Array.from(urlCache.keys()); },
         refreshLibrary: refreshLibrary,

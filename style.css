@@ -371,22 +371,10 @@
   background: rgba(224, 108, 117, .1);
   border-color: rgba(224, 108, 117, .3);
 }
-.lpic-src {
-  font-size: 11px;
-  color: var(--lpic-txt-3);
-  word-break: break-all;
-}
 .lpic-hint {
   font-size: 11px;
   color: var(--lpic-txt-3);
   line-height: 1.5;
-}
-.lpic-hint-warn {
-  color: #D9A662;
-  background: rgba(224, 164, 88, .07);
-  border: 1px solid rgba(224, 164, 88, .18);
-  border-radius: 7px;
-  padding: 6px 8px;
 }
 .lpic-example {
   font-size: 12px;
@@ -403,65 +391,205 @@
   user-select: all;
 }
 
-/* 关键词清单 */
-.lpic-kw-toggle {
-  appearance: none;
+/* 状态条：等待选择时整条可点，用来取消等待 */
+.lpic-status.lpic-status-wait {
+  color: #F0D3A6;
+  background: rgba(224, 164, 88, .12);
+  border-color: rgba(224, 164, 88, .4);
+}
+.lpic-status.lpic-status-clickable {
+  cursor: pointer;
+  animation: lpic-pulse 1.8s ease-in-out infinite;
+}
+.lpic-status.lpic-status-clickable:active { transform: scale(.99); filter: brightness(.94); }
+
+/* 新建关键词行 */
+.lpic-newkw {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  animation: lpic-slide .18s ease both;
+}
+.lpic-newkw .lpic-input { flex: 1 1 auto; }
+
+/* 关键词操作台 */
+.lpic-kw-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
-  width: 100%;
-  min-height: 34px;
-  padding: 0 10px;
-  border-radius: 7px;
-  border: 1px dashed var(--lpic-line-2);
-  background: transparent;
-  color: var(--lpic-txt-2);
-  font: inherit;
+  padding: 0 2px;
   font-size: 12px;
-  cursor: pointer;
-  transition: border-color .18s ease, color .18s ease;
+  color: var(--lpic-txt-2);
 }
-.lpic-kw-toggle:active { transform: scale(.99); }
-.lpic-kw-toggle span {
+.lpic-kw-head span {
   font-variant-numeric: tabular-nums;
   color: var(--lpic-acc-2);
 }
 .lpic-kw-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-height: 168px;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 292px;
   overflow: auto;
   padding: 2px;
-  animation: lpic-slide .2s ease both;
 }
-.lpic-kw-item {
+.lpic-kw-list:empty { display: none; }
+.lpic-kw-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border-radius: var(--lpic-r-s);
+  border: 1px solid var(--lpic-line);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .025), rgba(255, 255, 255, .008));
+  transition: border-color .18s ease, background .18s ease;
+}
+.lpic-kw-row:hover { border-color: rgba(224, 164, 88, .38); }
+.lpic-kw-main {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+  flex: 1 1 130px;
+  min-width: 0;
+}
+.lpic-kw-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lpic-txt);
+  word-break: break-all;
+}
+.lpic-kw-num {
+  font-size: 11px;
+  color: var(--lpic-txt-3);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--lpic-line);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+.lpic-kw-alias {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--lpic-txt-3);
+  word-break: break-all;
+}
+.lpic-kw-acts {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+.lpic-mini-btn {
   appearance: none;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid var(--lpic-line-2);
+  background: var(--lpic-bg-2);
+  color: var(--lpic-txt);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform .14s ease, filter .14s ease, border-color .18s ease, background .18s ease;
+}
+.lpic-mini-btn:active { transform: scale(.95); filter: brightness(.9); }
+.lpic-mini-primary {
+  background: linear-gradient(180deg, var(--lpic-acc-2), var(--lpic-acc-3));
+  border-color: rgba(240, 185, 110, .5);
+  color: #24190C;
+  font-weight: 600;
+}
+.lpic-mini-danger { color: #F2A0A7; border-color: rgba(224, 108, 117, .45); }
+.lpic-icon-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--lpic-line);
+  background: var(--lpic-bg-0);
+  color: var(--lpic-txt-2);
+  cursor: pointer;
+  transition: transform .14s ease, color .18s ease, border-color .18s ease, background .18s ease;
+}
+.lpic-icon-btn:active { transform: scale(.92); }
+.lpic-icon-btn:hover { color: var(--lpic-acc-2); border-color: rgba(224, 164, 88, .45); }
+.lpic-icon-danger:hover { color: #F2A0A7; border-color: rgba(224, 108, 117, .55); }
+
+/* 行内改名 / 删除与合并确认条 */
+.lpic-kw-edit,
+.lpic-kw-confirm {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
-  padding: 5px 9px;
-  border-radius: 999px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--lpic-line);
+  animation: lpic-slide .18s ease both;
+}
+.lpic-newkw[hidden],
+.lpic-kw-edit[hidden],
+.lpic-kw-confirm[hidden],
+.lpic-probe-out[hidden] { display: none; }
+.lpic-kw-edit .lpic-input { flex: 1 1 150px; }
+.lpic-confirm-text {
+  flex: 1 1 100%;
+  font-size: 12px;
+  color: #E8C48A;
+  line-height: 1.5;
+}
+.lpic-confirm-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 100%;
+}
+.lpic-select {
+  appearance: none;
+  max-width: 150px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 7px;
   border: 1px solid var(--lpic-line-2);
   background: var(--lpic-bg-0);
   color: var(--lpic-txt);
   font: inherit;
   font-size: 12px;
-  cursor: pointer;
-  transition: border-color .16s ease, transform .14s ease, background .16s ease;
-}
-.lpic-kw-item:active { transform: scale(.95); }
-.lpic-kw-item:hover { border-color: rgba(224, 164, 88, .5); background: rgba(224, 164, 88, .08); }
-.lpic-kw-num {
-  font-size: 11px;
-  color: var(--lpic-txt-3);
-  font-variant-numeric: tabular-nums;
 }
 .lpic-kw-empty {
   font-size: 12px;
   color: var(--lpic-txt-3);
+  line-height: 1.6;
   padding: 4px 2px;
+}
+
+/* 环境探测输出 */
+.lpic-probe-out {
+  margin: 0;
+  max-height: 224px;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 7px;
+  border: 1px solid var(--lpic-line);
+  background: var(--lpic-bg-0);
+  color: var(--lpic-txt-2);
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  -webkit-user-select: text;
+  user-select: text;
+  animation: lpic-slide .18s ease both;
 }
 
 /* ------------------------------ 3. 正文插图 ------------------------------ */
@@ -576,6 +704,10 @@
   from { opacity: 0; transform: translateY(-4px); }
   to   { opacity: 1; transform: translateY(0); }
 }
+@keyframes lpic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(224, 164, 88, .34); }
+  50%      { box-shadow: 0 0 0 4px rgba(224, 164, 88, .08); }
+}
 
 /* ------------------------------ 窄屏适配 ------------------------------ */
 @media (max-width: 520px) {
@@ -584,6 +716,8 @@
   .lpic-seg-btn { flex: 1 1 0; }
   .lpic-input { flex: 1 1 100%; }
   .lpic-row { gap: 8px; }
+  .lpic-newkw { flex-wrap: wrap; }
+  .lpic-kw-acts { flex: 1 1 100%; justify-content: flex-end; }
 }
 
 /* 尊重系统的「减少动态效果」偏好 */
@@ -591,5 +725,9 @@
   .lpic-block > img.lpic-img,
   .lpic-inline > img.lpic-img,
   .lpic-lb > img,
-  .lpic-kw-list { animation: none; }
+  .lpic-newkw,
+  .lpic-kw-edit,
+  .lpic-kw-confirm,
+  .lpic-probe-out,
+  .lpic-status.lpic-status-clickable { animation: none; }
 }
