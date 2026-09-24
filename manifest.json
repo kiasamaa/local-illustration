@@ -1,0 +1,10 @@
+{
+  "display_name": "本地插图",
+  "name": "local-illustration",
+  "id": "local-illustration",
+  "version": "1.0.0",
+  "type": "extension",
+  "js": "index.js",
+  "css": "style.css",
+  "author": ""
+}
