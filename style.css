@@ -137,6 +137,37 @@
 }
 .lpic-panel.lpic-collapsed .lpic-body { display: none; }
 
+/* 收起时的一行状态摘要（只在收起状态显示） */
+.lpic-sum {
+  display: none;
+  padding: 7px 12px 9px;
+  font-size: 12px;
+  color: var(--lpic-txt-3);
+}
+.lpic-panel.lpic-collapsed .lpic-sum { display: block; }
+
+/* 使用引导：三步说明 */
+.lpic-howto {
+  margin: 0;
+  padding-left: 19px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--lpic-txt-2);
+}
+.lpic-howto li::marker { color: var(--lpic-acc); font-weight: 600; }
+
+/* 诊断区：默认隐藏，打开开关才出现 */
+.lpic-diag {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  border-top: 1px dashed var(--lpic-line);
+  padding-top: 9px;
+}
+
 .lpic-group {
   border: 1px solid var(--lpic-line);
   border-radius: var(--lpic-r-s);
@@ -545,7 +576,8 @@
 .lpic-newkw[hidden],
 .lpic-kw-edit[hidden],
 .lpic-kw-confirm[hidden],
-.lpic-probe-out[hidden] { display: none; }
+.lpic-probe-out[hidden],
+.lpic-diag[hidden] { display: none; }
 .lpic-kw-edit .lpic-input { flex: 1 1 150px; }
 .lpic-confirm-text {
   flex: 1 1 100%;
@@ -731,6 +763,9 @@
   .lpic-row { gap: 8px; }
   .lpic-newkw { flex-wrap: wrap; }
   .lpic-kw-acts { flex: 1 1 100%; justify-content: flex-end; }
+  /* 手机上把可点区域做大一些，好按 */
+  .lpic-chev { width: 34px; height: 34px; }
+  .lpic-howto { font-size: 13px; }
 }
 
 /* 尊重系统的「减少动态效果」偏好 */

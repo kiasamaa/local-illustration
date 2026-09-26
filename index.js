@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -48,7 +48,9 @@
     pinPerMessage: true,    // 同一条消息内同一关键词固定同一张图
     lightbox: true,         // 点击图片放大查看
     caseSensitive: false,   // 关键词是否区分大小写
-    debug: false,           // 诊断日志
+    panelOpen: false,       // 设置面板是否展开（默认收起，并记住上次的选择）
+    showDiag: false,        // 是否显示诊断工具（默认隐藏，排查问题时才需要）
+    debug: false,           // 把调试日志输出到浏览器控制台
   };
 
   let settings = Object.assign({}, DEFAULT_SETTINGS);
@@ -161,6 +163,7 @@
 
   function warn() {
     ringPush('warn', arguments);
+    if (!settings.debug) return;   // 默认不刷控制台；记录仍保留，可在「诊断 → 最近日志」里查看
     try {
       const a = Array.prototype.slice.call(arguments);
       a.unshift('[lpic]');
@@ -227,10 +230,12 @@
   }
 
   function resetSettings() {
-    settings = Object.assign({}, DEFAULT_SETTINGS);
+    const keepOpen = settings.panelOpen;   // 面板展开与否属于界面偏好，保留它用户才看得见反馈
+    settings = Object.assign({}, DEFAULT_SETTINGS, { panelOpen: !!keepOpen });
     persist();
     syncUI();
     if (typeof onSettingsChanged === 'function') onSettingsChanged('__all__');
+    setStatus('已恢复默认设置：标记回到 [img]关键词[/img]，图片高度 ' + DEFAULT_SETTINGS.imgHeight + 'px', 'ok');
     log('已恢复默认设置');
   }
 
@@ -272,23 +277,26 @@
       + '      <span class="' + PREFIX + 'ver">v' + VERSION + '</span>'
       + '    </div>'
       + '    <div class="' + PREFIX + 'head-r">'
-      + '      <label class="' + PREFIX + 'switch" title="总开关">'
+      + '      <label class="' + PREFIX + 'switch" title="总开关：关闭后正文里的标记不再显示成图片">'
       + '        <input type="checkbox" data-lpic="enabled">'
       + '        <span class="' + PREFIX + 'slider"></span>'
       + '      </label>'
-      + '      <button class="' + PREFIX + 'chev" data-lpic-act="toggle-body" aria-label="展开或收起">' + icon('chevron') + '</button>'
+      + '      <button class="' + PREFIX + 'chev" data-lpic-act="toggle-body" aria-label="展开或收起设置" aria-expanded="false">' + icon('chevron') + '</button>'
       + '    </div>'
       + '  </div>'
+      + '  <div class="' + PREFIX + 'sum" id="' + PREFIX + 'sum"></div>'
       + '  <div class="' + PREFIX + 'body">'
 
-      // —— 标记设置 ——
+      // —— 怎么用 ——
       + '    <div class="' + PREFIX + 'group">'
-      + '      <div class="' + PREFIX + 'group-title">标记设置</div>'
-      + '      <div class="' + PREFIX + 'row">'
-      + '        <span class="' + PREFIX + 'label">标签名（可改成任意词，防与其他插件冲突）</span>'
-      + '        <input class="' + PREFIX + 'input" type="text" data-lpic="tag" maxlength="16" placeholder="img" spellcheck="false" autocomplete="off">'
-      + '      </div>'
-      + '      <div class="' + PREFIX + 'example">当前识别：<code class="' + PREFIX + 'example-code"></code></div>'
+      + '      <div class="' + PREFIX + 'group-title">怎么用</div>'
+      + '      <div class="' + PREFIX + 'hint">共三步：建关键词、加图片、让回复里出现标记。</div>'
+      + '      <ol class="' + PREFIX + 'howto">'
+      + '        <li>新建一个关键词（例如「挠头」），再点它的「加图」按钮选中图片。图片很多的可以用「按文件夹导入」，子文件夹名会自动成为关键词。</li>'
+      + '        <li>让回复里出现标记 <code class="' + PREFIX + 'example-code"></code>（标签名可改，见下方「标记设置」）。</li>'
+      + '        <li>聊天界面渲染这行文字时会显示成一张随机挑的图片。</li>'
+      + '      </ol>'
+      + '      <div class="' + PREFIX + 'hint">消息原文不会被改动：点「编辑」看到的仍然是纯文字，图片只是显示效果。</div>'
       + '    </div>'
 
       // —— 关键词与图片库 ——
@@ -299,12 +307,10 @@
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="rescan">' + icon('refresh') + '重新渲染</button>'
       + '      </div>'
       + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="import-folder">' + icon('folder') + '按文件夹导入（文件夹名=关键词）</button>'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="import-folder">' + icon('folder') + '按文件夹导入</button>'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="resync-folder">从上次的文件夹重新同步</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="resync-folder">' + icon('refresh') + '从上次的文件夹重新同步</button>'
-      + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会覆盖现有图片库：根目录下的每个子文件夹名 = 一个关键词（文件夹名可写 挠头|摸摸头 表示多个写法）。系统不支持选文件夹时会自动换一种方式再试。</div>'
+      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会替换整个图片库：所选目录下每个子文件夹名就是一个关键词，写成「挠头|摸摸头」表示几种写法都认。本机不支持选择文件夹时会自动改成选图片。</div>'
       + '      <div class="' + PREFIX + 'newkw" id="' + PREFIX + 'newkw" hidden>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic-newkw maxlength="60" spellcheck="false" autocomplete="off" placeholder="例如 挠头；多个写法写 挠头|摸摸头">'
       + '        <button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-new-ok">创建</button>'
@@ -324,7 +330,7 @@
       + '        <span class="' + PREFIX + 'val" id="' + PREFIX + 'h-val">200px</span>'
       + '      </div>'
       + '      <div class="' + PREFIX + 'row">'
-      + '        <span class="' + PREFIX + 'label">排版</span>'
+      + '        <span class="' + PREFIX + 'label">排版方式</span>'
       + '        <div class="' + PREFIX + 'seg" data-lpic-seg="blockMode">'
       + '          <button class="' + PREFIX + 'seg-btn" data-value="1">块级居中</button>'
       + '          <button class="' + PREFIX + 'seg-btn" data-value="0">行内小图</button>'
@@ -342,31 +348,47 @@
       + '        <label class="' + PREFIX + 'switch"><input type="checkbox" data-lpic="caseSensitive"><span class="' + PREFIX + 'slider"></span></label></div>'
       + '    </div>'
 
-      // —— 环境探测 ——
+      // —— 标记设置 ——
       + '    <div class="' + PREFIX + 'group">'
-      + '      <div class="' + PREFIX + 'group-title">环境探测</div>'
-      + '      <div class="' + PREFIX + 'hint">想确认这台设备支持哪些导入方式？点一下生成结论，把结果复制发给开发者即可。</div>'
-      + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe">' + icon('refresh') + '生成探测结果</button>'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-copy">复制结果</button>'
+      + '      <div class="' + PREFIX + 'group-title">标记设置</div>'
+      + '      <div class="' + PREFIX + 'row">'
+      + '        <span class="' + PREFIX + 'label">标签名</span>'
+      + '        <input class="' + PREFIX + 'input" type="text" data-lpic="tag" maxlength="16" placeholder="img" spellcheck="false" autocomplete="off">'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-folder">测试文件夹能力</button>'
-      + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">「测试文件夹能力」会弹一次选择器，用来确认这台设备能不能拿到文件夹信息（能拿到就能按文件夹名自动分关键词）。</div>'
-      + '      <pre class="' + PREFIX + 'probe-out" id="' + PREFIX + 'probe-out" hidden></pre>'
+      + '      <div class="' + PREFIX + 'example">当前识别：<code class="' + PREFIX + 'example-code"></code></div>'
+      + '      <div class="' + PREFIX + 'hint">标签名可以改成别的词（例如 localimg），避免与其它插件冲突。标记必须用方括号写成 <code>[标签名]关键词[/标签名]</code>：尖括号会被聊天界面的安全过滤当作 HTML 标签处理，标记会失效。</div>'
       + '    </div>'
 
-      // —— 底部 ——
+      // —— 数据 ——
       + '    <div class="' + PREFIX + 'group">'
-      + '      <div class="' + PREFIX + 'btn-row">'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="reset">恢复默认设置</button>'
-      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="debug">诊断日志</button>'
-      + '      </div>'
+      + '      <div class="' + PREFIX + 'group-title">数据</div>'
+      + '      <div class="' + PREFIX + 'hint">导入的图片只保存在本机浏览器数据库里，不上传、不联网。清除浏览器数据、换设备或卸载扩展都会丢失，请保留原始图片文件。</div>'
       + '      <div class="' + PREFIX + 'btn-row">'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost ' + PREFIX + 'btn-danger" data-lpic-act="clear">' + icon('trash') + '清空图片库</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">图片只保存在本机浏览器数据库里，不上传、不联网。先在「关键词与图片库」里新建关键词，再点「加图」；正文里写 [img]关键词[/img]，渲染时就会变成图片，而消息文字始终没被改动。</div>'
+      + '    </div>'
+
+      // —— 诊断（默认隐藏，需要时再打开） ——
+      + '    <div class="' + PREFIX + 'group">'
+      + '      <div class="' + PREFIX + 'group-title">诊断</div>'
+      + '      <div class="' + PREFIX + 'row"><span class="' + PREFIX + 'label">显示诊断工具</span>'
+      + '        <label class="' + PREFIX + 'switch"><input type="checkbox" data-lpic="showDiag"><span class="' + PREFIX + 'slider"></span></label></div>'
+      + '      <div class="' + PREFIX + 'diag" id="' + PREFIX + 'diag" hidden>'
+      + '        <div class="' + PREFIX + 'hint">以下信息用于排查问题，平时不用打开。遇到「标记没有变成图片」之类的情况时，先点「环境信息」，再点「复制」，把结果提供给插件作者即可。</div>'
+      + '        <div class="' + PREFIX + 'btn-row">'
+      + '          <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe">' + icon('refresh') + '环境信息</button>'
+      + '          <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-copy">复制</button>'
+      + '          <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="logs">最近日志</button>'
+      + '        </div>'
+      + '        <pre class="' + PREFIX + 'probe-out" id="' + PREFIX + 'probe-out" hidden></pre>'
+      + '        <div class="' + PREFIX + 'row"><span class="' + PREFIX + 'label">输出调试日志到控制台</span>'
+      + '          <label class="' + PREFIX + 'switch"><input type="checkbox" data-lpic="debug"><span class="' + PREFIX + 'slider"></span></label></div>'
+      + '        <div class="' + PREFIX + 'btn-row">'
+      + '          <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-folder">测试文件夹选择能力</button>'
+      + '          <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="reset">恢复默认设置</button>'
+      + '        </div>'
+      + '        <div class="' + PREFIX + 'hint">「测试文件夹选择能力」会弹一次选择窗口，用于确认本机能否读取文件夹信息（能读取才能按文件夹名自动分关键词）。</div>'
+      + '      </div>'
       + '    </div>'
 
       + '  </div>'
@@ -399,16 +421,39 @@
       });
     });
 
-    const code = panel.querySelector('.' + PREFIX + 'example-code');
-    if (code) code.textContent = sampleMarker();
+    const sample = sampleMarker();
+    panel.querySelectorAll('.' + PREFIX + 'example-code').forEach(function (el) {
+      el.textContent = sample;
+    });
 
     const hv = document.getElementById(PREFIX + 'h-val');
     if (hv) hv.textContent = settings.imgHeight + 'px';
 
-    const dbg = panel.querySelector('[data-lpic-act="debug"]');
-    if (dbg) dbg.textContent = '诊断日志：' + (settings.debug ? '开' : '关');
+    // 诊断工具默认隐藏，由「显示诊断工具」开关控制
+    const diag = document.getElementById(PREFIX + 'diag');
+    if (diag) diag.hidden = !settings.showDiag;
 
-    panel.classList.toggle(PREFIX + 'collapsed', state.collapsed === true);
+    const collapsed = !settings.panelOpen;
+    panel.classList.toggle(PREFIX + 'collapsed', collapsed);
+    const chev = panel.querySelector('.' + PREFIX + 'chev');
+    if (chev) chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+
+    renderSummary();
+  }
+
+  /** 收起时也要让人一眼看懂当前状态 */
+  function renderSummary() {
+    const el = document.getElementById(PREFIX + 'sum');
+    if (!el) return;
+    let text;
+    if (!indexList.length) {
+      text = '还没导入图片 · 点右侧箭头展开设置';
+    } else {
+      text = keywordList.length + ' 个关键词 · ' + indexList.length + ' 张图片';
+      if (!settings.enabled) text += ' · 已关闭';
+      text += ' · 点右侧箭头展开设置';
+    }
+    el.textContent = text;
   }
 
   /** 状态文字（导入流程会频繁调用）。kind='wait' 时整条可点，用来取消等待 */
@@ -499,10 +544,25 @@
     mount.addEventListener('click', onPanelClick);
     mount.addEventListener('input', onPanelInput);
     mount.addEventListener('change', onPanelChange);
+    mount.addEventListener('focusin', onPanelFocusIn);
     // 面板内的点击不再往外冒，避免穿透触发酒馆/其他插件的行为
     mount.addEventListener('click', function (e) {
       try { e.stopPropagation(); } catch (err) { /* ignore */ }
     });
+  }
+
+  /** 手机上软键盘会挡住输入框：聚焦后等键盘弹出，再把输入框滚到屏幕中间 */
+  function onPanelFocusIn(e) {
+    try {
+      const el = e.target;
+      if (!el || !el.closest) return;
+      if (!el.closest('[data-lpic-newkw], [data-lpic-kwedit]')) return;
+      setTimeout(function () {
+        try {
+          if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch (err) { /* 不支持就忽略 */ }
+      }, 280);
+    } catch (err) { /* ignore */ }
   }
 
   function readControlValue(el, key) {
@@ -572,8 +632,12 @@
   function handleAct(act, btn) {
     switch (act) {
       case 'toggle-body':
-        state.collapsed = !state.collapsed;
+        settings.panelOpen = !settings.panelOpen;
+        persist();
         syncUI();
+        break;
+      case 'logs':
+        showRecentLogs();
         break;
       case 'cancel-pick':
         // 自助解锁：无论选择器那边发生什么，点这一下立刻恢复可用
@@ -594,7 +658,7 @@
         state.generatingSince = 0;
         state.deferSince = 0;
         rebuildRendered(true);
-        setStatus('已重新渲染一遍（若画面仍是文字，请点「生成探测结果」把日志发我）', 'ok');
+        setStatus('已重新渲染一遍。若画面仍是文字，可打开下方「显示诊断工具」查看「环境信息」', 'ok');
         break;
       case 'reset':
         resetSettings();
@@ -1142,7 +1206,7 @@
 
     lockBusy();
     try {
-      setStatus('正在等待你选图片…（点这里取消等待）', 'wait');
+      setStatus('正在等待选择图片…（点这里取消）', 'wait');
       const files = await pickWithInput();
 
       // 留一份原始信息给「环境探测」，便于判断设备能力
@@ -1366,7 +1430,7 @@
       }
 
       // ---- 路线 B：支持相对路径的文件输入框（Chrome / 部分安卓浏览器可用） ----
-      setStatus('请在窗口里选中你的图片根目录…', 'wait');
+      setStatus('请在弹出的窗口里选择图片根目录…', 'wait');
       const files = await pickWithInput(true);
       if (!files.length) { setStatus('已取消，没有导入任何图片'); return; }
 
@@ -1500,6 +1564,7 @@
   function updateStats() {
     const total = indexList.length;
     const kwCount = keywordList.length;
+    renderSummary();     // 收起状态下的一行摘要也要跟着更新
     if (!total && !kwCount) {
       setStatus('还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图」按钮导入图片');
       renderKeywordList();
@@ -1673,7 +1738,7 @@
     const idAttr = esc(k.id);
 
     let html = '<span class="' + PREFIX + 'confirm-text">'
-      + (n ? ('「' + esc(k.name) + '」下面有 ' + n + ' 张图，你想怎么处理？')
+      + (n ? ('「' + esc(k.name) + '」下面还有 ' + n + ' 张图片，要如何处理？')
         : ('删除空关键词「' + esc(k.name) + '」？'))
       + '</span><div class="' + PREFIX + 'confirm-acts">';
 
@@ -2292,6 +2357,8 @@
 
   function onSettingsChanged(key) {
     try {
+      if (key === 'debug') { publishDebugApi(); return; }   // 开关一改就挂上/卸下控制台探针
+      if (key === 'showDiag' || key === 'panelOpen') return; // 纯界面项，不影响渲染
       if (key === 'enabled') {
         if (settings.enabled) rebuildRendered(false);
         else revertRendered();
@@ -2299,7 +2366,7 @@
       }
       if (!settings.enabled) return;
       if (key === '__all__') { pinned.clear(); rebuildRendered(false); applyDisplay(); return; }
-      if (key === 'tag' || key === 'wrap') { scheduleRebuild(); return; }
+      if (key === 'tag') { scheduleRebuild(); return; }
       if (key === 'imgHeight' || key === 'blockMode' || key === 'lightbox') { applyDisplay(); return; }
       if (key === 'applyToUser' || key === 'skipCode') { rebuildRendered(false); return; }
       if (key === 'caseSensitive') { pinned.clear(); rebuildRendered(false); return; }
@@ -2435,8 +2502,8 @@
       const out = document.getElementById(PREFIX + 'probe-out');
       if (out) { out.textContent = probeText; out.hidden = false; }
       setStatus(withPath.length
-        ? '实测结果：这台设备能拿到文件夹信息，请把结果发给开发者'
-        : '实测结果：这台设备拿不到文件夹信息，请用「新建关键词 → 加图」导入',
+        ? '实测结果：本机可以读取文件夹信息，可使用「按文件夹导入」'
+        : '实测结果：本机无法读取文件夹信息，请用「新建关键词 → 加图」导入',
       withPath.length ? 'ok' : 'err');
       log('文件夹能力实测：文件 ' + files.length + ' 个，带路径 ' + withPath.length + ' 个');
     } catch (e) {
@@ -2565,7 +2632,7 @@
       if (window.navigator && window.navigator.clipboard && window.navigator.clipboard.writeText) {
         async = true;
         window.navigator.clipboard.writeText(text).then(function () {
-          setStatus('已复制到剪贴板，直接粘给我就行', 'ok');
+          setStatus('已复制到剪贴板', 'ok');
         }).catch(function () {
           selectProbeText(out);
         });
@@ -2584,10 +2651,26 @@
       range.selectNodeContents(out);
       const sel = window.getSelection();
       if (sel) { sel.removeAllRanges(); sel.addRange(range); }
-      setStatus('系统不让自动复制，文字已帮你选中，长按手动复制即可', 'err');
+      setStatus('浏览器不允许自动复制，文字已选中，长按手动复制即可', 'err');
     } catch (e) {
       setStatus('复制失败，请手动选中下方文字复制', 'err');
     }
+  }
+
+  /** 在面板里直接看最近日志，手机上也用不着开控制台 */
+  function showRecentLogs() {
+    const out = document.getElementById(PREFIX + 'probe-out');
+    if (!out) return;
+    const lines = [];
+    lines.push('== 最近日志（最新在最后，共 ' + LOG_RING.length + ' 条）==');
+    lines.push('时间：' + new Date().toLocaleString() + ' · 插件版本 v' + VERSION);
+    lines.push('');
+    if (LOG_RING.length) LOG_RING.slice(-120).forEach(function (s) { lines.push('· ' + s); });
+    else lines.push('（暂无日志）');
+    probeText = lines.join('\n');
+    out.textContent = probeText;
+    out.hidden = false;
+    setStatus('日志已显示在下方，可点「复制」', 'ok');
   }
 
   /** 页面级委托：点正文里的插图 → 放大查看 */

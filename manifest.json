@@ -2,9 +2,10 @@
   "display_name": "本地插图",
   "name": "local-illustration",
   "id": "local-illustration",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "type": "extension",
   "js": "index.js",
   "css": "style.css",
-  "author": ""
+  "author": "kiasamaa",
+  "homePage": "https://github.com/kiasamaa/local-illustration"
 }
