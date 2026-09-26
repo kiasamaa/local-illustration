@@ -623,7 +623,9 @@
   box-shadow: 0 6px 18px rgba(0, 0, 0, .34);
   background: linear-gradient(100deg, #2A2E36 8%, #363B46 20%, #2A2E36 34%);
   background-size: 240% 100%;
-  animation: lpic-shimmer 1.5s linear infinite;
+  /* 第二个动画是保命用的：万一加载事件因为任何原因没触发，3 秒后图片也会自己显形，
+     绝不会出现「位置占着、图却永远不显示」 */
+  animation: lpic-shimmer 1.5s linear infinite, lpic-reveal .01s linear 3.2s forwards;
   opacity: 0;
   transform: scale(.965);
   cursor: zoom-in;
@@ -715,6 +717,10 @@
   0%, 100% { box-shadow: 0 0 0 0 rgba(224, 164, 88, .34); }
   50%      { box-shadow: 0 0 0 4px rgba(224, 164, 88, .08); }
 }
+@keyframes lpic-reveal {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 
 /* ------------------------------ 窄屏适配 ------------------------------ */
 @media (max-width: 520px) {
@@ -729,6 +735,9 @@
 
 /* 尊重系统的「减少动态效果」偏好 */
 @media (prefers-reduced-motion: reduce) {
+  /* 关掉动画时不能让图片停在 opacity:0，直接让它们可见 */
+  .lpic-block > img.lpic-img,
+  .lpic-inline > img.lpic-img { opacity: 1; }
   .lpic-block > img.lpic-img,
   .lpic-inline > img.lpic-img,
   .lpic-lb > img,

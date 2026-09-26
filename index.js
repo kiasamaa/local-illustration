@@ -125,7 +125,29 @@
 
   /* ======================= 二、设置读写 ======================= */
 
+  /* 最近日志环形缓冲：手机上看控制台很不方便，这里留一份给「环境探测」导出取证 */
+  const LOG_RING = [];
+  const LOG_RING_MAX = 260;
+
+  function ringPush(level, args) {
+    try {
+      const parts = [];
+      for (let i = 0; i < args.length; i += 1) {
+        const x = args[i];
+        if (x == null) parts.push(String(x));
+        else if (typeof x === 'string' || typeof x === 'number' || typeof x === 'boolean') parts.push(String(x));
+        else if (x instanceof Error) parts.push((x.name || 'Error') + ': ' + (x.message || ''));
+        else { try { parts.push(JSON.stringify(x)); } catch (e) { parts.push(String(x)); } }
+      }
+      const d = new Date();
+      const t = ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2) + ':' + ('0' + d.getSeconds()).slice(-2);
+      LOG_RING.push(t + ' [' + level + '] ' + parts.join(' '));
+      while (LOG_RING.length > LOG_RING_MAX) LOG_RING.shift();
+    } catch (e) { /* ignore */ }
+  }
+
   function log() {
+    ringPush('log', arguments);
     if (!settings.debug) return;
     try {
       const a = Array.prototype.slice.call(arguments);
@@ -135,6 +157,7 @@
   }
 
   function warn() {
+    ringPush('warn', arguments);
     try {
       const a = Array.prototype.slice.call(arguments);
       a.unshift('[lpic]');
@@ -278,7 +301,7 @@
       + '      <div class="' + PREFIX + 'btn-row">'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="resync-folder">' + icon('refresh') + '从上次的文件夹重新同步</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会覆盖现有图片库：根目录下的每个子文件夹名 = 一个关键词（文件夹名可写 挠头|摸摸头 表示多个写法）。</div>'
+      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会覆盖现有图片库：根目录下的每个子文件夹名 = 一个关键词（文件夹名可写 挠头|摸摸头 表示多个写法）。系统不支持选文件夹时会自动换一种方式再试。</div>'
       + '      <div class="' + PREFIX + 'newkw" id="' + PREFIX + 'newkw" hidden>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic-newkw maxlength="60" spellcheck="false" autocomplete="off" placeholder="例如 挠头；多个写法写 挠头|摸摸头">'
       + '        <button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-new-ok">创建</button>'
@@ -1199,15 +1222,30 @@
     return groups;
   }
 
-  /** 用某个目录句柄做一次覆盖式同步（先扫描，扫到了才清库） */
-  async function syncFromRoot(root) {
-    setStatus('正在扫描文件夹…', 'wait');
-    const groups = await scanRootDir(root);
+  /** 同名的分组先合并（例如同时存在 叹气/ 与 叹气|唉声叹气/ 两个文件夹时，把别名并到一起） */
+  function mergeSameNameGroups(groups) {
+    const map = new Map();
+    (groups || []).forEach(function (g) {
+      const key = String((g.names && g.names[0]) || '').toLowerCase();
+      if (!key || !g.files || !g.files.length) return;
+      if (!map.has(key)) map.set(key, { names: (g.names || []).slice(), files: [] });
+      const target = map.get(key);
+      (g.names || []).forEach(function (n) {
+        const k = String(n).toLowerCase();
+        if (!target.names.some(function (x) { return String(x).toLowerCase() === k; })) target.names.push(n);
+      });
+      target.files = target.files.concat(g.files);
+    });
+    return Array.from(map.values());
+  }
+
+  /** 覆盖式导入：先确认有图，再清库，然后按分组建关键词并倒图 */
+  async function importGroups(rawGroups) {
+    const groups = mergeSameNameGroups(rawGroups);
     let totalFiles = 0;
     groups.forEach(function (g) { totalFiles += g.files.length; });
-
     if (!totalFiles) {
-      setStatus('这个文件夹里没找到图片。请把图片放进以关键词命名的子文件夹（例如 根目录/挠头/1.png）', 'err');
+      setStatus('没找到图片。请把图片放进以关键词命名的子文件夹（例如 根目录/挠头/1.png）', 'err');
       return 0;
     }
 
@@ -1231,63 +1269,113 @@
     }
 
     afterLibraryChanged();
+    log('按文件夹导入完成：', keywordList.length, '个关键词 /', total, '张图');
     return total;
   }
 
-  /** 这台设备被系统拦下了网页选文件夹 —— 记住它，别再让用户白点 */
+  /** 用目录句柄做一次覆盖式同步 */
+  async function syncFromRoot(root) {
+    setStatus('正在扫描文件夹…', 'wait');
+    return importGroups(await scanRootDir(root));
+  }
+
+  /** 从文件名猜关键词（没有文件夹信息时的兜底） */
+  function namePrefix(name) {
+    const base = String(name || '').replace(/\.[^.]+$/, '').trim();
+    if (!base) return '';
+    const m = base.match(/^(.+?)[\s_\-.#（(．]+/);
+    return (m && m[1] ? m[1] : base).trim();
+  }
+
+  /** 按相对路径分组：根/关键词/x.png → 关键词；根/x.png → 用根目录名 */
+  function groupFilesByFolder(files) {
+    const map = new Map();
+    for (let i = 0; i < files.length; i += 1) {
+      const f = files[i];
+      const rel = String(f.webkitRelativePath || '').replace(/\\/g, '/');
+      const parts = rel.split('/').filter(Boolean);
+      let kw = '';
+      if (parts.length >= 3) kw = parts[1];               // 根/关键词/…/图
+      else if (parts.length === 2) kw = parts[0];         // 根/图 → 用根目录名
+      else kw = namePrefix(f.name || '');                 // 没有路径信息时兜底
+      const names = splitNames(kw);
+      if (!names.length) continue;
+      const key = names[0].toLowerCase();
+      if (!map.has(key)) map.set(key, { names: names.slice(), files: [] });
+      const group = map.get(key);
+      names.forEach(function (n) {
+        const k = n.toLowerCase();
+        if (!group.names.some(function (x) { return String(x).toLowerCase() === k; })) group.names.push(n);
+      });
+      group.files.push(f);
+    }
+    return Array.from(map.values());
+  }
+
+  /** 目录授权这条路被系统拦下了 —— 记住它，下次直接走「可选文件夹的输入框」那条路 */
   function markDirPickerBlocked(errName, errMsg) {
     state.dirPickerBlocked = true;
     state.lastPickerError = { name: errName || 'Error', message: String(errMsg || ''), at: Date.now() };
-    try {
-      const panel = document.getElementById(PREFIX + 'panel');
-      if (panel) {
-        panel.querySelectorAll('[data-lpic-act="import-folder"], [data-lpic-act="resync-folder"]').forEach(function (b) {
-          if (b.getAttribute('data-lpic-blocked') === '1') return;
-          b.setAttribute('data-lpic-blocked', '1');
-          b.classList.add(PREFIX + 'btn-mute');
-          b.textContent = b.textContent + '（本机不可用）';
-        });
-      }
-    } catch (e) { /* ignore */ }
+    log('已记下：目录授权接口本机不可用（' + errName + '），下次直接走另一条路');
   }
 
   const DIR_BLOCKED_TIP = '这台设备的系统不允许网页选文件夹，请改用「新建关键词 → 加图」导入图片';
 
   async function importFromFolder() {
     if (isBusy()) { setStatus('上一次导入还没结束，点这里可以取消等待', 'wait'); return; }
-    if (state.dirPickerBlocked) { setStatus(DIR_BLOCKED_TIP + '（已实测过，不再重复尝试）', 'err'); return; }
-    if (!hasDirPicker()) {
-      setStatus('这台设备没有提供选文件夹的接口，请改用「新建关键词 → 加图」', 'err');
+    if (!hasDirPicker() && state.dirPickerBlocked) {
+      setStatus(DIR_BLOCKED_TIP, 'err');
       return;
     }
     lockBusy();
     try {
-      setStatus('正在打开文件夹选择器…', 'wait');
-      let root = null;
-      try {
-        root = await window.showDirectoryPicker({ mode: 'read' });
-      } catch (e) {
-        const name = (e && e.name) ? e.name : 'Error';
-        warn('打开文件夹失败', name, e);
-        if (name === 'AbortError') {
-          setStatus('已取消，没有导入任何图片');
+      // ---- 路线 A：真正的目录授权（电脑版 Chrome / 支持该接口的浏览器） ----
+      if (hasDirPicker() && !state.dirPickerBlocked) {
+        let root = null;
+        setStatus('正在打开文件夹选择器…', 'wait');
+        try {
+          root = await window.showDirectoryPicker({ mode: 'read' });
+        } catch (e) {
+          const nm = (e && e.name) ? e.name : 'Error';
+          if (nm === 'AbortError') {
+            setStatus('已取消，没有导入任何图片');
+            return;
+          }
+          // 有的环境接口存在但会被系统直接拒绝，且不弹任何窗口 —— 与"用户取消"区分开，并自动改走路线 B
+          warn('目录授权不可用', nm, e);
+          markDirPickerBlocked(nm, e && e.message);
+          log('目录授权被系统拒绝，改用可选文件夹的输入框继续');
+        }
+        if (root) {
+          const total = await syncFromRoot(root);
+          if (!total) return;
+          try { await dbPut(STORE_META, [{ key: META_DIRHANDLE, handle: root }]); } catch (e) { /* 记不住就算了 */ }
+          try { await dbPut(STORE_META, [{ key: META_SOURCE, info: { folder: root.name, kw: keywordList.length, total: total, ts: Date.now() } }]); } catch (e) { /* ignore */ }
+          lastImportInfo = { at: Date.now(), count: total, mode: 'folder', folder: root.name, samples: [] };
+          setStatus('按文件夹导入完成：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片', 'ok');
           return;
         }
-        // 安卓等环境里接口存在但会被系统直接拒绝，且不会有任何弹窗 —— 必须与"用户取消"区分开
-        markDirPickerBlocked(name, e && e.message);
-        setStatus(DIR_BLOCKED_TIP + '（系统返回：' + name + '）', 'err');
+      }
+
+      // ---- 路线 B：支持相对路径的文件输入框（Chrome / 部分安卓浏览器可用） ----
+      setStatus('请在窗口里选中你的图片根目录…', 'wait');
+      const files = await pickWithInput(true);
+      if (!files.length) { setStatus('已取消，没有导入任何图片'); return; }
+
+      const withPath = files.filter(function (f) { return String(f.webkitRelativePath || '').length > 0; });
+      if (!withPath.length) {
+        setStatus('这次没拿到文件夹信息（这台设备的选择器只给文件）。请改用「新建关键词 → 加图」导入。', 'err');
         return;
       }
-      if (!root) { setStatus('已取消，没有导入任何图片'); return; }
 
-      const total = await syncFromRoot(root);
+      const groups = groupFilesByFolder(files);
+      const total = await importGroups(groups);
       if (!total) return;
 
-      try { await dbPut(STORE_META, [{ key: META_DIRHANDLE, handle: root }]); } catch (e) { /* 记不住就算了 */ }
-      try { await dbPut(STORE_META, [{ key: META_SOURCE, info: { folder: root.name, kw: keywordList.length, total: total, ts: Date.now() } }]); } catch (e) { /* ignore */ }
-
-      lastImportInfo = { at: Date.now(), count: total, mode: 'folder', folder: root.name, samples: [] };
-      setStatus('按文件夹导入完成：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片', 'ok');
+      const rootName = String(withPath[0].webkitRelativePath || '').split('/')[0] || '文件夹';
+      try { await dbPut(STORE_META, [{ key: META_SOURCE, info: { folder: rootName, kw: keywordList.length, total: total, ts: Date.now() } }]); } catch (e) { /* ignore */ }
+      lastImportInfo = { at: Date.now(), count: total, mode: 'folder-path', folder: rootName, samples: [] };
+      setStatus('按文件夹导入完成：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片（文件夹名已作为关键词）', 'ok');
     } catch (e) {
       warn('按文件夹导入失败', e);
       setStatus('按文件夹导入失败：' + (e && e.message ? e.message : e) + '（可改用「加图」多选图片）', 'err');
@@ -1299,8 +1387,8 @@
   /** 用上次记住的目录句柄再同步一次（不用重新选文件夹） */
   async function resyncFromFolder() {
     if (isBusy()) { setStatus('上一次导入还没结束，点这里可以取消等待', 'wait'); return; }
-    if (!hasDirPicker()) {
-      setStatus('这台设备不支持选择文件夹，请改用「新建关键词 → 加图」', 'err');
+    if (!hasDirPicker() || state.dirPickerBlocked) {
+      setStatus('这台设备没法记住文件夹授权，请直接点上面的「按文件夹导入」', 'err');
       return;
     }
     lockBusy();
@@ -1822,6 +1910,7 @@
     const path = pickPath(entry, mesId, kw);
     if (!path) return document.createTextNode(raw);
 
+    log('插入插图：关键词=' + kw + ' 图片=' + path);
     getUrl(path).then(function (url) {
       if (!url) {
         state.stats.fails += 1;
@@ -1833,6 +1922,7 @@
       }
       img.addEventListener('load', function () {
         wrap.classList.add(PREFIX + 'ready');
+        log('插图已加载：' + path + ' (' + img.naturalWidth + 'x' + img.naturalHeight + ')');
       });
       img.addEventListener('error', function () {
         state.stats.fails += 1;
@@ -1843,6 +1933,40 @@
       });
       img.src = url;
       if (img.complete && img.naturalWidth) wrap.classList.add(PREFIX + 'ready');
+
+      // 5 秒后自查：图没出来就把现场状态记进日志（手机上看不到控制台，只能靠这个取证）
+      setTimeout(function () {
+        try {
+          if (img.naturalWidth > 0) {
+            // 图其实已经好了，只是加载事件没触发到 —— 把 ready 补上，别让它一直停在透明状态
+            if (!wrap.classList.contains(PREFIX + 'ready')) {
+              wrap.classList.add(PREFIX + 'ready');
+              log('插图补上 ready 标记（加载事件未触发）：' + path);
+            }
+            return;
+          }
+          if (!wrap.parentNode) return;          // 已经被还原成文字了，不用管
+          warn('插图自查异常：' + JSON.stringify({
+            path: path,
+            hasSrc: !!img.getAttribute('src'),
+            srcHead: String(img.getAttribute('src') || '').slice(0, 24),
+            complete: img.complete,
+            natural: img.naturalWidth + 'x' + img.naturalHeight,
+            wrap: wrap.className,
+            wrapH: Math.round(wrap.getBoundingClientRect().height),
+            dbReady: state.dbReady,
+            urls: urlCache.size,
+          }));
+          urlCache.delete(path);               // 丢掉可能失效的缓存，强制重取一次
+          getUrl(path).then(function (u2) {
+            if (!u2) { warn('插图重取失败：' + path); return; }
+            if (u2 !== img.getAttribute('src')) {
+              img.src = u2;
+              log('插图已重新取图：' + path);
+            }
+          });
+        } catch (e) { /* ignore */ }
+      }, 5000);
     });
 
     return wrap;
@@ -2369,6 +2493,14 @@
       + ' GEN_ENDED=' + (evNames.indexOf('GENERATION_ENDED') >= 0)
       + ' MSG_UPDATED=' + (evNames.indexOf('MESSAGE_UPDATED') >= 0));
     lines.push('');
+    lines.push('');
+    lines.push('【最近日志（最新在最后，共 ' + LOG_RING.length + ' 条）】');
+    if (LOG_RING.length) {
+      LOG_RING.slice(-60).forEach(function (s) { lines.push('· ' + s); });
+    } else {
+      lines.push('（暂无）');
+    }
+    lines.push('');
     lines.push('【运行环境】');
     lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + indexList.length + ' 张');
     lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
@@ -2570,6 +2702,7 @@
         testFolder: testFolderCapability,
         dirPicker: function () { return { blocked: state.dirPickerBlocked, lastError: state.lastPickerError, lastTest: state.lastFolderTest }; },
         events: availableEventNames,
+        logs: function (n) { return LOG_RING.slice(-(Number(n) || 60)); },
         stats: function () { return Object.assign({}, state.stats); },
         dbReady: function () { return state.dbReady; },
         lastImport: function () { return lastImportInfo; },
