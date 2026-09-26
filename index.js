@@ -2,7 +2,7 @@
  * 本地插图 · local-illustration
  * SillyTavern 客户端扩展（安卓 Tauri Tavern 优先，兼容电脑版标准酒馆）
  * ----------------------------------------------------------------------------
- * 作用：AI 回复里出现约定好的标记时（默认 [img]挠头[/img]），在【渲染阶段】
+ * 作用：AI 回复里出现约定好的标记时（默认 [img]关键词[/img]），在【渲染阶段】
  *       把它显示成从本地图片库随机选中的一张图片。
  * 铁律：绝不修改消息原文（ctx.chat[i].mes 一个字符都不动），
  *       所以点击「编辑」时看到的仍然是纯文本。
@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -28,9 +28,12 @@
   const META_INDEX = 'index';
   const META_SOURCE = 'source';
   const META_KEYWORDS = 'keywords';
+  const META_DIRHANDLE = 'dirhandle';
 
   const PICK_TIMEOUT_MS = 90000;   // 选择器硬超时：到点必然结算，绝不留下悬空状态
   const BUSY_MAX_MS = 60000;       // 导入锁最长持有时长，超时自动解锁
+  const GEN_MAX_DEFER_MS = 20000;  // 因为「正在生成」而推迟渲染的最长时间，超过就直接渲染
+  const SCAN_BURST = [600, 1500, 3000, 6000, 12000];   // 启动后补扫的次数与时间点
 
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'];
 
@@ -66,6 +69,14 @@
     mountTimer: 0,
     armClear: 0,
     generating: false,
+    deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
+    failTimer: 0,
+    failRetries: 0,
+    dbReady: false,
+    dbRetries: 0,
+    dbRetryTimer: 0,
+    observerTimer: 0,
+    stats: { hits: 0, fails: 0, scans: 0, lastScanAt: 0, lastErr: '' },
   };
 
   /** 统一入口：拿酒馆上下文（任何一步都可能不存在，全部兜底） */
@@ -258,6 +269,13 @@
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-primary" data-lpic-act="kw-new">' + icon('plus') + '新建关键词</button>'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="rescan">' + icon('refresh') + '重新渲染</button>'
       + '      </div>'
+      + '      <div class="' + PREFIX + 'btn-row">'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="import-folder">' + icon('folder') + '按文件夹导入（文件夹名=关键词）</button>'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'btn-row">'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="resync-folder">' + icon('refresh') + '从上次的文件夹重新同步</button>'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会覆盖现有图片库：根目录下的每个子文件夹名 = 一个关键词（文件夹名可写 挠头|摸摸头 表示多个写法）。</div>'
       + '      <div class="' + PREFIX + 'newkw" id="' + PREFIX + 'newkw" hidden>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic-newkw maxlength="60" spellcheck="false" autocomplete="off" placeholder="例如 挠头；多个写法写 挠头|摸摸头">'
       + '        <button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-new-ok">创建</button>'
@@ -324,7 +342,7 @@
 
   function sampleMarker() {
     const tag = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
-    return '[' + tag + ']挠头[/' + tag + ']';
+    return '[' + tag + ']关键词[/' + tag + ']';
   }
 
   /** 把当前设置回灌到面板控件上 */
@@ -646,18 +664,33 @@
     return out;
   }
 
+  /** 打开图片库。注意：失败绝不缓存结果 —— 否则一次偶然失败会让整场（直到刷新）都用不了 */
   function openDB() {
     if (dbPromise) return dbPromise;
-    dbPromise = new Promise(function (resolve) {
+
+    const attempt = new Promise(function (resolve) {
       let req;
+      let settled = false;
+      let timer = 0;
+
+      function done(db, why) {
+        if (settled) return;
+        settled = true;
+        if (timer) { clearTimeout(timer); timer = 0; }
+        state.dbReady = !!db;
+        if (!db) log('图片库这次没打开（' + (why || 'unknown') + '），稍后会自动重试');
+        resolve(db);
+      }
+
       try {
-        if (!window.indexedDB) { resolve(null); return; }
+        if (!window.indexedDB) { done(null, 'no-indexeddb'); return; }
         req = indexedDB.open(DB_NAME, DB_VER);
       } catch (e) {
         warn('打开图片库异常', e);
-        resolve(null);
+        done(null, 'exception');
         return;
       }
+
       req.onupgradeneeded = function () {
         const db = req.result;
         try {
@@ -670,11 +703,30 @@
           }
         } catch (e) { warn('建表失败', e); }
       };
-      req.onsuccess = function () { resolve(req.result); };
-      req.onerror = function () { warn('打开图片库失败', req.error); resolve(null); };
-      req.onblocked = function () { resolve(null); };
+      req.onsuccess = function () { done(req.result); };
+      req.onerror = function () { warn('打开图片库失败', req.error); done(null, 'error'); };
+      req.onblocked = function () { done(null, 'blocked'); };
+      // 有的环境既不成功也不报错，加超时避免整场卡住
+      timer = setTimeout(function () { done(null, 'timeout'); }, 8000);
+    });
+
+    dbPromise = attempt.then(function (db) {
+      if (!db) dbPromise = null;      // 关键：失败不缓存，下次调用重新尝试
+      return db;
     });
     return dbPromise;
+  }
+
+  /** 图片库没打开时自动补一次重试，避免用户必须刷新网页 */
+  function scheduleLibraryRetry() {
+    if (state.dbRetryTimer) return;
+    state.dbRetries += 1;
+    if (state.dbRetries > 8) return;
+    state.dbRetryTimer = setTimeout(function () {
+      state.dbRetryTimer = 0;
+      dbPromise = null;
+      refreshLibrary();
+    }, 3000);
   }
 
   function dbGet(store, key) {
@@ -1082,6 +1134,171 @@
     }
   }
 
+  /* ---- 按文件夹导入：文件夹名 = 关键词（需要浏览器支持目录授权） ---- */
+
+  function hasDirPicker() {
+    return typeof window.showDirectoryPicker === 'function';
+  }
+
+  async function collectDirFiles(dirHandle, out, depth) {
+    if (depth > 3 || out.length > 3000) return;
+    let it;
+    try { it = dirHandle.entries(); } catch (e) { return; }
+    for await (const entry of it) {
+      const handle = entry[1];
+      if (!handle) continue;
+      if (handle.kind === 'file') {
+        try {
+          const f = await handle.getFile();
+          if (isImageFile(f)) out.push(f);
+        } catch (e) { /* 单个文件读不了就跳过 */ }
+      } else if (handle.kind === 'directory') {
+        await collectDirFiles(handle, out, depth + 1);
+      }
+    }
+  }
+
+  /** 枚举根目录：每个子文件夹 = 一个关键词；根目录下的散图归到根目录名 */
+  async function scanRootDir(root) {
+    const groups = [];
+    const loose = [];
+    let it;
+    try { it = root.entries(); } catch (e) { return groups; }
+    for await (const entry of it) {
+      const name = String(entry[0] || '');
+      const handle = entry[1];
+      if (!handle) continue;
+      if (handle.kind === 'directory') {
+        const files = [];
+        await collectDirFiles(handle, files, 0);
+        const names = splitNames(name);
+        if (files.length && names.length) groups.push({ names: names, files: files });
+      } else if (handle.kind === 'file') {
+        try {
+          const f = await handle.getFile();
+          if (isImageFile(f)) loose.push(f);
+        } catch (e) { /* ignore */ }
+      }
+    }
+    if (loose.length) {
+      const rootNames = splitNames(root.name || '未分组');
+      if (rootNames.length) groups.push({ names: rootNames, files: loose });
+    }
+    return groups;
+  }
+
+  /** 用某个目录句柄做一次覆盖式同步（先扫描，扫到了才清库） */
+  async function syncFromRoot(root) {
+    setStatus('正在扫描文件夹…', 'wait');
+    const groups = await scanRootDir(root);
+    let totalFiles = 0;
+    groups.forEach(function (g) { totalFiles += g.files.length; });
+
+    if (!totalFiles) {
+      setStatus('这个文件夹里没找到图片。请把图片放进以关键词命名的子文件夹（例如 根目录/挠头/1.png）', 'err');
+      return 0;
+    }
+
+    // 先确认扫到了东西，再清库 —— 避免扫到一半把旧数据擦掉
+    revertRendered();
+    revokeUrls();
+    pinned.clear();
+    await dbClear(STORE_FILES);
+    await dbClear(STORE_META);
+    indexList = [];
+    keywordList = [];
+
+    let total = 0;
+    for (let i = 0; i < groups.length; i += 1) {
+      const g = groups[i];
+      const created = await createKeyword(g.names.join('|'));
+      const kw = created.ok ? created.keyword : getKeyword(g.names[0]);
+      if (!kw) continue;
+      setStatus('正在导入「' + kw.name + '」的 ' + g.files.length + ' 张图…', 'wait');
+      total += await doImport(g.files, kw.id);
+    }
+
+    afterLibraryChanged();
+    return total;
+  }
+
+  async function importFromFolder() {
+    if (isBusy()) { setStatus('上一次导入还没结束，点这里可以取消等待', 'wait'); return; }
+    if (!hasDirPicker()) {
+      setStatus('这台设备不支持选择文件夹，请改用「新建关键词 → 加图」', 'err');
+      return;
+    }
+    lockBusy();
+    try {
+      setStatus('请在弹窗里选中你的图片根目录…', 'wait');
+      let root = null;
+      try {
+        root = await window.showDirectoryPicker({ mode: 'read' });
+      } catch (e) {
+        if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) {
+          setStatus('已取消，没有导入任何图片');
+          return;
+        }
+        warn('打开文件夹失败', e);
+        setStatus('打不开文件夹：' + (e && e.message ? e.message : e) + '（可改用「加图」多选图片）', 'err');
+        return;
+      }
+      if (!root) { setStatus('已取消，没有导入任何图片'); return; }
+
+      const total = await syncFromRoot(root);
+      if (!total) return;
+
+      try { await dbPut(STORE_META, [{ key: META_DIRHANDLE, handle: root }]); } catch (e) { /* 记不住就算了 */ }
+      try { await dbPut(STORE_META, [{ key: META_SOURCE, info: { folder: root.name, kw: keywordList.length, total: total, ts: Date.now() } }]); } catch (e) { /* ignore */ }
+
+      lastImportInfo = { at: Date.now(), count: total, mode: 'folder', folder: root.name, samples: [] };
+      setStatus('按文件夹导入完成：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片', 'ok');
+    } catch (e) {
+      warn('按文件夹导入失败', e);
+      setStatus('按文件夹导入失败：' + (e && e.message ? e.message : e) + '（可改用「加图」多选图片）', 'err');
+    } finally {
+      unlockBusy();
+    }
+  }
+
+  /** 用上次记住的目录句柄再同步一次（不用重新选文件夹） */
+  async function resyncFromFolder() {
+    if (isBusy()) { setStatus('上一次导入还没结束，点这里可以取消等待', 'wait'); return; }
+    if (!hasDirPicker()) {
+      setStatus('这台设备不支持选择文件夹，请改用「新建关键词 → 加图」', 'err');
+      return;
+    }
+    lockBusy();
+    try {
+      const rec = await dbGet(STORE_META, META_DIRHANDLE);
+      const root = rec ? rec.handle : null;
+      if (!root) { setStatus('还没记下文件夹，先点一次「按文件夹导入」', 'err'); return; }
+
+      try {
+        if (typeof root.queryPermission === 'function') {
+          let perm = await root.queryPermission({ mode: 'read' });
+          if (perm !== 'granted' && typeof root.requestPermission === 'function') {
+            perm = await root.requestPermission({ mode: 'read' });
+          }
+          if (perm !== 'granted') {
+            setStatus('没有拿到文件夹权限，请重新点「按文件夹导入」', 'err');
+            return;
+          }
+        }
+      } catch (e) { warn('目录权限检查失败', e); }
+
+      const total = await syncFromRoot(root);
+      if (!total) return;
+      lastImportInfo = { at: Date.now(), count: total, mode: 'folder', folder: root.name, samples: [] };
+      setStatus('已从「' + (root.name || '文件夹') + '」同步：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片', 'ok');
+    } catch (e) {
+      warn('重新同步失败', e);
+      setStatus('重新同步失败：' + (e && e.message ? e.message : e) + '（可重新点「按文件夹导入」）', 'err');
+    } finally {
+      unlockBusy();
+    }
+  }
+
   /** 启动时载入：关键词 + 图片索引，并顺手做一次旧数据自愈迁移 */
   async function refreshLibrary() {
     try {
@@ -1098,9 +1315,14 @@
       buildIndex();
       updateStats();
       applyAll();
+
+      if (state.dbReady) state.dbRetries = 0;
+      else scheduleLibraryRetry();      // 库没打开就自动重试，别让用户去刷新网页
+
       log('图片库已就绪：', keywordList.length, '个关键词 /', indexList.length, '张图');
     } catch (e) {
       warn('读取图片库失败', e);
+      scheduleLibraryRetry();
     }
   }
 
@@ -1501,7 +1723,8 @@
     return null;
   }
 
-  function isGenerating() {
+  /** 是否正在生成（仅作参考） */
+  function isGeneratingNow() {
     if (state.generating) return true;
     try {
       const stop = document.getElementById('mes_stop');
@@ -1509,6 +1732,22 @@
       if (document.querySelector('#chat .mes.streaming')) return true;
     } catch (e) { /* ignore */ }
     return false;
+  }
+
+  /** 要不要因为「正在生成」而推迟这次渲染？
+   *  只在刚开始的短时间内推辞，超过上限就照渲染 —— 宁可闪一下图，也绝不出现「一直不生效」。 */
+  function shouldDeferRender() {
+    if (!isGeneratingNow()) {
+      state.deferSince = 0;
+      return false;
+    }
+    if (!state.deferSince) state.deferSince = Date.now();
+    if (Date.now() - state.deferSince > GEN_MAX_DEFER_MS) {
+      log('等待生成结束已超过上限，改为直接渲染（避免一直不生效）');
+      state.deferSince = 0;
+      return false;
+    }
+    return true;
   }
 
   function replaceWithText(el, text) {
@@ -1549,9 +1788,24 @@
     if (!path) return document.createTextNode(raw);
 
     getUrl(path).then(function (url) {
-      if (!url) { toFailText(wrap, raw); return; }
-      img.addEventListener('load', function () { wrap.classList.add(PREFIX + 'ready'); });
-      img.addEventListener('error', function () { toFailText(wrap, raw); });
+      if (!url) {
+        state.stats.fails += 1;
+        state.stats.lastErr = '图片读取失败：' + path;
+        warn('图片读取失败', path);
+        toFailText(wrap, raw);
+        scheduleFailRetry();
+        return;
+      }
+      img.addEventListener('load', function () {
+        wrap.classList.add(PREFIX + 'ready');
+      });
+      img.addEventListener('error', function () {
+        state.stats.fails += 1;
+        state.stats.lastErr = '图片解码失败：' + path;
+        warn('图片解码失败', path);
+        toFailText(wrap, raw);
+        scheduleFailRetry();
+      });
       img.src = url;
       if (img.complete && img.naturalWidth) wrap.classList.add(PREFIX + 'ready');
     });
@@ -1588,6 +1842,7 @@
     if (!changed) return;
     if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
     if (!node.parentNode) return;
+    state.stats.hits += changed;
     node.parentNode.replaceChild(frag, node);
   }
 
@@ -1628,13 +1883,14 @@
         if (role === 'system') return;
         if (role === 'user' && !settings.applyToUser) return;
       }
-      if (isGenerating()) {          // 生成中先不动，避免图片闪烁
+      if (shouldDeferRender()) {     // 生成中先不动，避免图片闪烁（但有时间上限）
         state.dirty = true;
         scheduleRetry();
         return;
       }
       processRoot(textEl, getMesId(mesEl));
     } catch (e) {
+      state.stats.lastErr = String(e && e.message ? e.message : e);
       warn('处理消息失败', e);
     }
   }
@@ -1643,11 +1899,15 @@
     try {
       if (!settings.enabled) return;
       const chat = getChatEl();
-      if (!chat) return;
+      if (!chat) { scheduleStartObserver(); return; }
       const list = chat.querySelectorAll('.mes_text');
+      state.stats.scans += 1;
+      state.stats.lastScanAt = Date.now();
       for (let i = 0; i < list.length; i += 1) processMesText(list[i]);
       state.retryCount = 0;
+      state.failRetries = 0;
     } catch (e) {
+      state.stats.lastErr = String(e && e.message ? e.message : e);
       warn('全量渲染失败', e);
     }
   }
@@ -1684,9 +1944,21 @@
       if (!state.dirty) return;
       state.dirty = false;
       state.retryCount += 1;
-      if (state.retryCount > 40) { state.retryCount = 0; return; }
+      if (state.retryCount > 150) { state.retryCount = 0; return; }   // 兜底上限（约 3 分钟）
       applyAll();
     }, 1200);
+  }
+
+  /** 图片没读出来时补一次重试（有限次，避免死循环） */
+  function scheduleFailRetry() {
+    state.failRetries += 1;
+    if (state.failRetries > 3) return;
+    if (state.failTimer) return;
+    state.failTimer = setTimeout(function () {
+      state.failTimer = 0;
+      log('有图片没加载成功，重试一次');
+      rebuildRendered(false);
+    }, 2500);
   }
 
   /* ------------------ 监听聊天区域变化 ------------------ */
@@ -1755,6 +2027,35 @@
       state.observer = null;
       return false;
     }
+  }
+
+  /** 聊天容器还没出现时的自动重试（最多约 15 秒，之后交给巡检） */
+  function scheduleStartObserver() {
+    if (state.observerTimer) return;
+    state.observerTimer = setInterval(function () {
+      if (startObserver()) {
+        clearInterval(state.observerTimer);
+        state.observerTimer = 0;
+      }
+    }, 800);
+    setTimeout(function () {
+      if (state.observerTimer) {
+        clearInterval(state.observerTimer);
+        state.observerTimer = 0;
+      }
+    }, 15000);
+  }
+
+  /** 启动后补扫几次：防止消息比插件先渲染好、或首扫时图片库还没就绪 */
+  function startScanBurst() {
+    SCAN_BURST.forEach(function (d) {
+      setTimeout(function () {
+        try {
+          if (!state.observedEl) startObserver();
+          applyAll();
+        } catch (e) { /* ignore */ }
+      }, d);
+    });
   }
 
   /** 兜底巡检：聊天容器被换掉时自动重挂监听 */
@@ -1890,6 +2191,8 @@
   function handleExtraAct(act, btn) {
     const id = btn ? (btn.getAttribute('data-kw-id') || '') : '';
     switch (act) {
+      case 'import-folder': importFromFolder(); break;
+      case 'resync-folder': resyncFromFolder(); break;
       case 'kw-new': openNewKeywordRow(); break;
       case 'kw-new-cancel': closeNewKeywordRow(); break;
       case 'kw-new-ok': createKeywordFromUI(); break;
@@ -1911,6 +2214,16 @@
   /* ---- 环境探测：用大白话回答「这台设备到底能不能选文件夹」 ---- */
 
   let probeText = '';
+
+  function availableEventNames() {
+    try {
+      const et = getEventTypes();
+      if (!et) return [];
+      return Object.keys(et).filter(function (k) { return typeof et[k] === 'string'; });
+    } catch (e) {
+      return [];
+    }
+  }
 
   function runEnvProbe() {
     const ua = String((window.navigator && window.navigator.userAgent) || '');
@@ -1957,10 +2270,23 @@
       lines.push('（还没导入过。先点一次「加图」随便选几张图，再来生成会更全）');
     }
     lines.push('');
+    lines.push('【渲染与事件】');
+    lines.push('· 图片库连接：' + (state.dbReady ? '正常' : '未打开（正在自动重试）'));
+    lines.push('· 渲染统计：扫描 ' + state.stats.scans + ' 次 · 命中 ' + state.stats.hits + ' 处 · 失败 ' + state.stats.fails + ' 处');
+    lines.push('· 最近一次扫描：' + (state.stats.lastScanAt ? new Date(state.stats.lastScanAt).toLocaleString() : '从未'));
+    if (state.stats.lastErr) lines.push('· 最近一次错误：' + state.stats.lastErr);
+    const evNames = availableEventNames();
+    lines.push('· 可用的酒馆事件：' + (evNames.length ? evNames.join(', ') : '(取不到)'));
+    lines.push('· 关键事件是否可用：'
+      + ' CHAR_RENDERED=' + (evNames.indexOf('CHARACTER_MESSAGE_RENDERED') >= 0)
+      + ' GEN_ENDED=' + (evNames.indexOf('GENERATION_ENDED') >= 0)
+      + ' MSG_UPDATED=' + (evNames.indexOf('MESSAGE_UPDATED') >= 0));
+    lines.push('');
     lines.push('【运行环境】');
     lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + indexList.length + ' 张');
     lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
     lines.push('· 酒馆事件系统可用：' + ((getEventSource() && getEventTypes()) ? '是' : '否'));
+    lines.push('· 文件夹导入支持：' + (hasDirPicker() ? '支持' : '不支持'));
 
     probeText = lines.join('\n');
     const out = document.getElementById(PREFIX + 'probe-out');
@@ -2101,6 +2427,7 @@
     on(et.GENERATION_STARTED, function () { state.generating = true; });
     const genEnd = function () {
       state.generating = false;
+      state.deferSince = 0;
       state.dirty = false;
       state.retryCount = 0;
       scheduleScanAll();
@@ -2109,6 +2436,11 @@
     on(et.GENERATION_STOPPED, genEnd);
 
     on(et.MESSAGE_RECEIVED, function () { setTimeout(scheduleScanAll, 120); });
+
+    // 额外的渲染触发点：有的壳没有这些事件，取到哪个就挂哪个
+    on(et.CHARACTER_MESSAGE_RENDERED, function () { scheduleScanAll(); });
+    on(et.USER_MESSAGE_RENDERED, function () { scheduleScanAll(); });
+    on(et.MESSAGE_RENDERED, function () { scheduleScanAll(); });
 
     log('已订阅酒馆事件');
   }
@@ -2143,7 +2475,12 @@
         deleteKeyword: deleteKeyword,
         mergeKeyword: mergeKeywordInto,
         importFiles: doImport,
+        importFolder: importFromFolder,
+        resyncFolder: resyncFromFolder,
         probe: runEnvProbe,
+        events: availableEventNames,
+        stats: function () { return Object.assign({}, state.stats); },
+        dbReady: function () { return state.dbReady; },
         lastImport: function () { return lastImportInfo; },
         busy: function () { return { busy: state.busy, since: state.busySince, waiting: !!state.cancelPick }; },
         pinned: function () { return Array.from(pinned.entries()); },
@@ -2166,10 +2503,11 @@
     bindDocEvents();
     ensureLightbox();
     mountPanelWithRetry();
-    startObserver();
+    if (!startObserver()) scheduleStartObserver();
     startWatchdog();
     bindSTEvents();
     refreshLibrary();
+    startScanBurst();
     publishDebugApi();
     log('初始化完成 v' + VERSION);
   }
