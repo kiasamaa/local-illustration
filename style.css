@@ -344,6 +344,13 @@
   border-color: var(--lpic-line);
 }
 .lpic-btn-danger { color: var(--lpic-err); border-color: rgba(224, 108, 117, .35); }
+/* 实测不可用的按钮：压暗并去掉强调，避免用户继续白点 */
+.lpic-btn-mute {
+  opacity: .5;
+  color: var(--lpic-txt-3);
+  border-style: dashed;
+  box-shadow: none;
+}
 .lpic-btn-danger.lpic-armed {
   background: rgba(224, 108, 117, .16);
   border-color: rgba(224, 108, 117, .68);

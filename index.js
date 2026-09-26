@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -76,6 +76,9 @@
     dbRetries: 0,
     dbRetryTimer: 0,
     observerTimer: 0,
+    dirPickerBlocked: false,     // 实测：系统不允许网页选文件夹
+    lastPickerError: null,
+    lastFolderTest: null,
     stats: { hits: 0, fails: 0, scans: 0, lastScanAt: 0, lastErr: '' },
   };
 
@@ -321,6 +324,10 @@
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe">' + icon('refresh') + '生成探测结果</button>'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-copy">复制结果</button>'
       + '      </div>'
+      + '      <div class="' + PREFIX + 'btn-row">'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="probe-folder">测试文件夹能力</button>'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'hint">「测试文件夹能力」会弹一次选择器，用来确认这台设备能不能拿到文件夹信息（能拿到就能按文件夹名自动分关键词）。</div>'
       + '      <pre class="' + PREFIX + 'probe-out" id="' + PREFIX + 'probe-out" hidden></pre>'
       + '    </div>'
 
@@ -844,9 +851,9 @@
     }
   }
 
-  /** 打开系统选择器（只做多选图片）。
+  /** 打开系统选择器（isDir=true 时尝试目录模式，仅供「文件夹能力实测」使用）。
    *  无论成功 / 取消 / 超时 / 异常，Promise 都一定会结算，绝不留下悬空的等待状态。 */
-  function pickWithInput() {
+  function pickWithInput(isDir) {
     return new Promise(function (resolve) {
       let input = null;
       let settled = false;
@@ -916,6 +923,11 @@
         input.type = 'file';
         input.multiple = true;
         input.accept = 'image/*';
+        if (isDir) {
+          input.webkitdirectory = true;
+          input.setAttribute('webkitdirectory', '');
+          input.setAttribute('directory', '');
+        }
         input.style.position = 'fixed';
         input.style.left = '-9999px';
         input.style.top = '0';
@@ -1222,25 +1234,48 @@
     return total;
   }
 
+  /** 这台设备被系统拦下了网页选文件夹 —— 记住它，别再让用户白点 */
+  function markDirPickerBlocked(errName, errMsg) {
+    state.dirPickerBlocked = true;
+    state.lastPickerError = { name: errName || 'Error', message: String(errMsg || ''), at: Date.now() };
+    try {
+      const panel = document.getElementById(PREFIX + 'panel');
+      if (panel) {
+        panel.querySelectorAll('[data-lpic-act="import-folder"], [data-lpic-act="resync-folder"]').forEach(function (b) {
+          if (b.getAttribute('data-lpic-blocked') === '1') return;
+          b.setAttribute('data-lpic-blocked', '1');
+          b.classList.add(PREFIX + 'btn-mute');
+          b.textContent = b.textContent + '（本机不可用）';
+        });
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  const DIR_BLOCKED_TIP = '这台设备的系统不允许网页选文件夹，请改用「新建关键词 → 加图」导入图片';
+
   async function importFromFolder() {
     if (isBusy()) { setStatus('上一次导入还没结束，点这里可以取消等待', 'wait'); return; }
+    if (state.dirPickerBlocked) { setStatus(DIR_BLOCKED_TIP + '（已实测过，不再重复尝试）', 'err'); return; }
     if (!hasDirPicker()) {
-      setStatus('这台设备不支持选择文件夹，请改用「新建关键词 → 加图」', 'err');
+      setStatus('这台设备没有提供选文件夹的接口，请改用「新建关键词 → 加图」', 'err');
       return;
     }
     lockBusy();
     try {
-      setStatus('请在弹窗里选中你的图片根目录…', 'wait');
+      setStatus('正在打开文件夹选择器…', 'wait');
       let root = null;
       try {
         root = await window.showDirectoryPicker({ mode: 'read' });
       } catch (e) {
-        if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) {
+        const name = (e && e.name) ? e.name : 'Error';
+        warn('打开文件夹失败', name, e);
+        if (name === 'AbortError') {
           setStatus('已取消，没有导入任何图片');
           return;
         }
-        warn('打开文件夹失败', e);
-        setStatus('打不开文件夹：' + (e && e.message ? e.message : e) + '（可改用「加图」多选图片）', 'err');
+        // 安卓等环境里接口存在但会被系统直接拒绝，且不会有任何弹窗 —— 必须与"用户取消"区分开
+        markDirPickerBlocked(name, e && e.message);
+        setStatus(DIR_BLOCKED_TIP + '（系统返回：' + name + '）', 'err');
         return;
       }
       if (!root) { setStatus('已取消，没有导入任何图片'); return; }
@@ -2206,6 +2241,7 @@
       case 'kw-merge': mergeKeywordFromRow(id, btn); break;
       case 'probe': runEnvProbe(); break;
       case 'probe-copy': copyProbeResult(); break;
+      case 'probe-folder': testFolderCapability(); break;
       case 'lb-close': closeLightbox(); break;
       default: break;
     }
@@ -2214,6 +2250,47 @@
   /* ---- 环境探测：用大白话回答「这台设备到底能不能选文件夹」 ---- */
 
   let probeText = '';
+
+  /** 决定性实测：这台设备到底能不能拿到「文件夹信息」 */
+  async function testFolderCapability() {
+    if (isBusy()) { setStatus('刚才的操作还没结束，稍等一下再试', 'wait'); return; }
+    lockBusy();
+    try {
+      setStatus('请在弹出的窗口里选一个文件夹（或随便选几张图）…', 'wait');
+      const files = await pickWithInput(true);
+      const withPath = files.filter(function (f) { return String(f.webkitRelativePath || '').length > 0; });
+
+      const lines = [];
+      lines.push('== 文件夹能力实测 ==');
+      lines.push('时间：' + new Date().toLocaleString());
+      lines.push('拿到的文件数：' + files.length);
+      lines.push('其中带文件夹路径的：' + withPath.length);
+      files.slice(0, 5).forEach(function (f, i) {
+        lines.push('· #' + (i + 1) + ' 名称=' + (f.name || '')
+          + ' 类型=' + (f.type || '')
+          + ' 大小=' + fmtSize(f.size)
+          + ' 相对路径=' + (f.webkitRelativePath || '(空)'));
+      });
+      lines.push('· 结论：' + (withPath.length
+        ? '这台设备能拿到文件夹信息，「文件夹名=关键词」是可行的'
+        : '这台设备拿不到文件夹信息（系统选择器只给文件），只能用「新建关键词 → 加图」'));
+
+      state.lastFolderTest = { at: Date.now(), count: files.length, withPath: withPath.length, raw: lines.join('\n') };
+      probeText = lines.join('\n');
+      const out = document.getElementById(PREFIX + 'probe-out');
+      if (out) { out.textContent = probeText; out.hidden = false; }
+      setStatus(withPath.length
+        ? '实测结果：这台设备能拿到文件夹信息，请把结果发给开发者'
+        : '实测结果：这台设备拿不到文件夹信息，请用「新建关键词 → 加图」导入',
+      withPath.length ? 'ok' : 'err');
+      log('文件夹能力实测：文件 ' + files.length + ' 个，带路径 ' + withPath.length + ' 个');
+    } catch (e) {
+      warn('文件夹能力实测失败', e);
+      setStatus('实测失败：' + (e && e.message ? e.message : e), 'err');
+    } finally {
+      unlockBusy();
+    }
+  }
 
   function availableEventNames() {
     try {
@@ -2245,13 +2322,23 @@
     lines.push('');
     lines.push('【能不能选文件夹】');
     lines.push('· 网页属性 webkitdirectory：' + (dirAttr ? '存在（但安卓的系统选择器通常给不了文件夹）' : '不存在'));
-    lines.push('· showDirectoryPicker（真正的文件夹授权）：' + (dirPicker ? '支持' : '不支持'));
+    lines.push('· showDirectoryPicker 接口：' + (dirPicker ? '浏览器提供了' : '没有提供') + '（注意：接口存在 ≠ 真的能用）');
+    lines.push('· 文件夹选择实测：' + (state.lastPickerError
+      ? ('被拒绝 · 错误名 ' + state.lastPickerError.name
+        + (state.lastPickerError.message ? (' · ' + state.lastPickerError.message) : ''))
+      : '本次会话还没试过'));
+    lines.push('· webkitdirectory 实测：' + (state.lastFolderTest
+      ? ('拿到 ' + state.lastFolderTest.count + ' 个文件，其中带路径的 ' + state.lastFolderTest.withPath + ' 个')
+      : '还没测过（可点下面的「测试文件夹能力」）'));
     lines.push('· Tauri 目录接口 __TAURI__.fs.readDir：'
       + (tauriFs ? '发现（有希望按路径读文件夹）' : (hasTauri ? '存在 __TAURI__ 但没有 fs.readDir' : '未发现')));
     lines.push('· Tauri invoke：' + (tauriInvoke ? '发现' : '未发现'));
-    lines.push('· 结论：' + ((!dirPicker && !tauriFs)
-      ? '这台设备无法选择文件夹，请用「新建关键词 → 加图」的方式导入'
-      : '检测到可能可用的目录接口，请把本结果发给开发者'));
+
+    let dirVerdict;
+    if (state.dirPickerBlocked) dirVerdict = '本机不可用：系统拦截了网页选文件夹，请用「新建关键词 → 加图」导入';
+    else if (!dirPicker && !tauriFs) dirVerdict = '本机不可用：没有可用的目录接口，请用「新建关键词 → 加图」导入';
+    else dirVerdict = '接口存在，但要点一次才知道能不能真用（点击被拒绝就说明本机不可用）';
+    lines.push('· 结论：' + dirVerdict);
     lines.push('');
     lines.push('【最近一次导入拿到的原始文件信息】');
     if (lastImportInfo && lastImportInfo.samples && lastImportInfo.samples.length) {
@@ -2286,7 +2373,9 @@
     lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + indexList.length + ' 张');
     lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
     lines.push('· 酒馆事件系统可用：' + ((getEventSource() && getEventTypes()) ? '是' : '否'));
-    lines.push('· 文件夹导入支持：' + (hasDirPicker() ? '支持' : '不支持'));
+    lines.push('· 文件夹导入：' + (state.dirPickerBlocked
+      ? ('实测不可用（' + (state.lastPickerError ? state.lastPickerError.name : '被拒绝') + '）')
+      : (hasDirPicker() ? '接口存在，本次会话尚未实测' : '不支持')));
 
     probeText = lines.join('\n');
     const out = document.getElementById(PREFIX + 'probe-out');
@@ -2478,6 +2567,8 @@
         importFolder: importFromFolder,
         resyncFolder: resyncFromFolder,
         probe: runEnvProbe,
+        testFolder: testFolderCapability,
+        dirPicker: function () { return { blocked: state.dirPickerBlocked, lastError: state.lastPickerError, lastTest: state.lastFolderTest }; },
         events: availableEventNames,
         stats: function () { return Object.assign({}, state.stats); },
         dbReady: function () { return state.dbReady; },
