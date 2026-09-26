@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.2.1';
+  const VERSION = '1.4.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -32,7 +32,8 @@
 
   const PICK_TIMEOUT_MS = 90000;   // 选择器硬超时：到点必然结算，绝不留下悬空状态
   const BUSY_MAX_MS = 60000;       // 导入锁最长持有时长，超时自动解锁
-  const GEN_MAX_DEFER_MS = 20000;  // 因为「正在生成」而推迟渲染的最长时间，超过就直接渲染
+  const GEN_MAX_DEFER_MS = 5000;   // 因为「正在生成」而推迟渲染的最长时间，超过就直接渲染（宁可闪一下也要出图）
+  const ASSURE_SCAN_MS = 15000;    // 保命重扫间隔：无论发生什么，最多这么久一定把该出的图补上
   const SCAN_BURST = [600, 1500, 3000, 6000, 12000];   // 启动后补扫的次数与时间点
 
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'];
@@ -69,7 +70,9 @@
     mountTimer: 0,
     armClear: 0,
     generating: false,
+    generatingSince: 0, // 从什么时候开始处于生成中（用来识别卡死状态）
     deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
+    assureTimer: 0,
     failTimer: 0,
     failRetries: 0,
     dbReady: false,
@@ -586,7 +589,12 @@
         if (typeof requestClearLibrary === 'function') requestClearLibrary(btn);
         break;
       case 'rescan':
-        if (typeof rebuildRendered === 'function') rebuildRendered();
+        // 手动点「重新渲染」时不受任何「生成中」状态影响，点了就必须立刻生效
+        state.generating = false;
+        state.generatingSince = 0;
+        state.deferSince = 0;
+        rebuildRendered(true);
+        setStatus('已重新渲染一遍（若画面仍是文字，请点「生成探测结果」把日志发我）', 'ok');
         break;
       case 'reset':
         resetSettings();
@@ -1846,27 +1854,35 @@
     return null;
   }
 
-  /** 是否正在生成（仅作参考） */
+  /** 是否正在生成。
+   *  只认「真的收到过生成开始事件」这一个信号。
+   *  曾经还靠猜 DOM（停止按钮可见 / .mes.streaming）—— 这两种判断在不同酒馆版本里表现不一，
+   *  一旦猜错，渲染会被无休止推迟，表现就是「图没了、只剩文字」。宁可不避让，也不能不渲染。 */
   function isGeneratingNow() {
-    if (state.generating) return true;
-    try {
-      const stop = document.getElementById('mes_stop');
-      if (stop && stop.offsetParent !== null && !stop.classList.contains('displayNone')) return true;
-      if (document.querySelector('#chat .mes.streaming')) return true;
-    } catch (e) { /* ignore */ }
-    return false;
+    if (!state.generating) return false;
+    if (state.generatingSince && Date.now() - state.generatingSince > 90000) {
+      log('生成状态已持续超过 90 秒，判定为卡住，自动清除');
+      state.generating = false;
+      state.generatingSince = 0;
+      return false;
+    }
+    return true;
   }
 
   /** 要不要因为「正在生成」而推迟这次渲染？
-   *  只在刚开始的短时间内推辞，超过上限就照渲染 —— 宁可闪一下图，也绝不出现「一直不生效」。 */
-  function shouldDeferRender() {
+   *  只在刚开始的几秒内推辞；超过上限就把生成标记一并清掉，
+   *  这样同一次扫描里的其它消息不会被轮流推迟（修掉「只有第一条消息出图」的 bug）。 */
+  function shouldDeferRender(force) {
+    if (force) { state.deferSince = 0; return false; }
     if (!isGeneratingNow()) {
       state.deferSince = 0;
       return false;
     }
     if (!state.deferSince) state.deferSince = Date.now();
     if (Date.now() - state.deferSince > GEN_MAX_DEFER_MS) {
-      log('等待生成结束已超过上限，改为直接渲染（避免一直不生效）');
+      log('等生成结束已超过上限，判定为卡住：清除生成标记并直接渲染');
+      state.generating = false;
+      state.generatingSince = 0;
       state.deferSince = 0;
       return false;
     }
@@ -2032,9 +2048,10 @@
     }
   }
 
-  function processMesText(textEl) {
+  function processMesText(textEl, force) {
     try {
       if (!textEl || !textEl.isConnected) return;
+      // force=true 时不受「生成中」影响（保命重扫与用户主动操作都用它）
       if (!settings.enabled) return;
       const mesEl = textEl.closest ? textEl.closest('.mes') : null;
       if (mesEl) {
@@ -2042,7 +2059,7 @@
         if (role === 'system') return;
         if (role === 'user' && !settings.applyToUser) return;
       }
-      if (shouldDeferRender()) {     // 生成中先不动，避免图片闪烁（但有时间上限）
+      if (shouldDeferRender(force)) {   // 生成中先不动，避免图片闪烁（但有很短的时间上限；force 时完全不推迟）
         state.dirty = true;
         scheduleRetry();
         return;
@@ -2054,7 +2071,7 @@
     }
   }
 
-  function applyAll() {
+  function applyAll(force) {
     try {
       if (!settings.enabled) return;
       const chat = getChatEl();
@@ -2062,13 +2079,25 @@
       const list = chat.querySelectorAll('.mes_text');
       state.stats.scans += 1;
       state.stats.lastScanAt = Date.now();
-      for (let i = 0; i < list.length; i += 1) processMesText(list[i]);
+      for (let i = 0; i < list.length; i += 1) processMesText(list[i], force);
       state.retryCount = 0;
       state.failRetries = 0;
     } catch (e) {
       state.stats.lastErr = String(e && e.message ? e.message : e);
       warn('全量渲染失败', e);
     }
+  }
+
+  /** 保命重扫：不管前面发生过什么（事件没来、状态卡住、别人重绘了消息），
+   *  最多 ASSURE_SCAN_MS 一定把该显示的图补回来。这是最后一道防线。 */
+  function startAssuranceScan() {
+    if (state.assureTimer) return;
+    state.assureTimer = setInterval(function () {
+      try {
+        if (!settings.enabled) return;
+        applyAll(true);
+      } catch (e) { /* ignore */ }
+    }, ASSURE_SCAN_MS);
   }
 
   /** 把画面上所有插图还原成原文（原文一字未改，所以能完整还原） */
@@ -2086,11 +2115,13 @@
     }
   }
 
+  /** 还原后再重画。凡是走这里的都是「明确要渲染一次」的场合（换聊天、改设置、手动重扫），
+   *  所以一律强制渲染，不受任何「生成中」状态影响。 */
   function rebuildRendered(clearPins) {
     try {
       revertRendered();
       if (clearPins) pinned.clear();
-      applyAll();
+      applyAll(true);
     } catch (e) {
       warn('重新渲染失败', e);
     }
@@ -2484,6 +2515,11 @@
     lines.push('【渲染与事件】');
     lines.push('· 图片库连接：' + (state.dbReady ? '正常' : '未打开（正在自动重试）'));
     lines.push('· 渲染统计：扫描 ' + state.stats.scans + ' 次 · 命中 ' + state.stats.hits + ' 处 · 失败 ' + state.stats.fails + ' 处');
+    lines.push('· 生成标记：' + (state.generating
+      ? ('是（已持续 ' + Math.round((Date.now() - (state.generatingSince || Date.now())) / 1000) + ' 秒）')
+      : '否')
+      + ' · 推迟中=' + (state.deferSince ? Math.round((Date.now() - state.deferSince) / 1000) + '秒' : '否')
+      + ' · 保命重扫=' + (state.assureTimer ? '已开启' : '未开启'));
     lines.push('· 最近一次扫描：' + (state.stats.lastScanAt ? new Date(state.stats.lastScanAt).toLocaleString() : '从未'));
     if (state.stats.lastErr) lines.push('· 最近一次错误：' + state.stats.lastErr);
     const evNames = availableEventNames();
@@ -2611,12 +2647,22 @@
 
     on(et.CHAT_CHANGED, function () {
       log('切换聊天，清空随机记忆并重新渲染');
+      // 换聊天是用户主动动作，之前的生成状态一律作废，别让它挡住渲染
+      state.generating = false;
+      state.generatingSince = 0;
+      state.deferSince = 0;
       pinned.clear();
       rebuildRendered(false);
     });
 
     // 消息被编辑 / 更新 / 切换 swipe：解绑该消息的随机记忆后重新处理
     const mesChanged = function (data) {
+      // 编辑正文并确认/取消、消息更新、切换 swipe 都是用户主动动作，
+      // 不该被残留的「生成中」状态挡住 —— 否则画面会一直停在纯文字
+      state.generating = false;
+      state.generatingSince = 0;
+      state.deferSince = 0;
+
       const ids = [];
       try {
         if (typeof data === 'number') ids.push(data);
@@ -2645,9 +2691,13 @@
     on(et.MESSAGE_SWIPED, mesChanged);
     on(et.MESSAGE_DELETED, function () { pinned.clear(); scheduleScanAll(); });
 
-    on(et.GENERATION_STARTED, function () { state.generating = true; });
+    on(et.GENERATION_STARTED, function () {
+      state.generating = true;
+      state.generatingSince = Date.now();
+    });
     const genEnd = function () {
       state.generating = false;
+      state.generatingSince = 0;
       state.deferSince = 0;
       state.dirty = false;
       state.retryCount = 0;
@@ -2656,7 +2706,10 @@
     on(et.GENERATION_ENDED, genEnd);
     on(et.GENERATION_STOPPED, genEnd);
 
-    on(et.MESSAGE_RECEIVED, function () { setTimeout(scheduleScanAll, 120); });
+    on(et.MESSAGE_RECEIVED, function () {
+      state.deferSince = 0;
+      setTimeout(scheduleScanAll, 120);
+    });
 
     // 额外的渲染触发点：有的壳没有这些事件，取到哪个就挂哪个
     on(et.CHARACTER_MESSAGE_RENDERED, function () { scheduleScanAll(); });
@@ -2732,6 +2785,7 @@
     bindSTEvents();
     refreshLibrary();
     startScanBurst();
+    startAssuranceScan();
     publishDebugApi();
     log('初始化完成 v' + VERSION);
   }
