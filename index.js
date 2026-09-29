@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.5.1';
+  const VERSION = '1.6.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -38,11 +38,17 @@
   const SCAN_BURST = [600, 1500, 3000, 6000, 12000];   // 启动后补扫的次数与时间点
 
   const IMG_EXT = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'svg'];
+  // 浏览器（安卓 WebView / Chrome）能直接播放的视频容器
+  const VID_EXT = ['mp4', 'm4v', 'mov', 'webm', 'ogv'];
+  // 常见但浏览器放不了的格式：导入时直接跳过并说明原因，免得正文里出现黑框
+  const VID_EXT_BAD = ['mkv', 'avi', 'flv', 'wmv', 'rmvb', 'rm', 'mpg', 'mpeg', 'ts', '3gp', 'vob', 'asf', 'divx'];
+  const LARGE_VIDEO_BYTES = 20 * 1024 * 1024;   // 单个视频超过这个大小就在导入结果里提醒一下
 
   const DEFAULT_SETTINGS = {
     enabled: true,          // 总开关
-    tag: 'img',             // 标签名（可改成任意词防冲突）
-    imgHeight: 200,         // 插图高度（像素）
+    tag: 'img',             // 图片标记的标签名（可改成任意词防冲突）
+    videoTag: 'video',      // 视频标记的标签名（[video]关键词[/video]）
+    imgHeight: 200,         // 插图/视频高度（像素）
     blockMode: true,        // true=块级居中，false=行内小图
     applyToUser: false,     // 是否也处理用户消息
     skipCode: true,         // 跳过代码块与行内代码
@@ -198,6 +204,7 @@
     // 归一化，避免脏数据/旧快照造成的异常值
     settings.enabled = !!settings.enabled;
     settings.tag = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
+    settings.videoTag = clampTag(settings.videoTag) || DEFAULT_SETTINGS.videoTag;
     settings.imgHeight = Math.max(40, Math.min(800, Math.round(Number(settings.imgHeight) || DEFAULT_SETTINGS.imgHeight)));
     settings.blockMode = !!settings.blockMode;
     settings.applyToUser = !!settings.applyToUser;
@@ -264,6 +271,10 @@
         return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M4 16.5V20h3.5L19 8.5 15.5 5z"/><path d="M14 6.5 17.5 10"/></svg>';
       case 'close':
         return '<svg width="18" height="18" viewBox="0 0 24 24" ' + p + '><path d="M6 6l12 12M18 6L6 18"/></svg>';
+      case 'play':
+        return '<svg width="26" height="26" viewBox="0 0 24 24" ' + p + '><path d="M9.5 6.4v11.2l8.8-5.6z"/></svg>';
+      case 'expand':
+        return '<svg width="15" height="15" viewBox="0 0 24 24" ' + p + '><path d="M9 3.5H4.5a1 1 0 0 0-1 1V9M15 3.5h4.5a1 1 0 0 1 1 1V9M15 20.5h4.5a1 1 0 0 0 1-1V15M9 20.5H4.5a1 1 0 0 1-1-1V15"/></svg>';
       default:
         return '';
     }
@@ -292,13 +303,13 @@
       // —— 怎么用 ——
       + '    <div class="' + PREFIX + 'group">'
       + '      <div class="' + PREFIX + 'group-title">怎么用</div>'
-      + '      <div class="' + PREFIX + 'hint">共三步：建关键词、加图片、让回复里出现标记。</div>'
+      + '      <div class="' + PREFIX + 'hint">共三步：建关键词、加素材、让回复里出现标记。</div>'
       + '      <ol class="' + PREFIX + 'howto">'
-      + '        <li>新建一个关键词（例如「挠头」），再点它的「加图」按钮选中图片。图片很多的可以用「按文件夹导入」，子文件夹名会自动成为关键词。</li>'
-      + '        <li>让回复里出现标记 <code class="' + PREFIX + 'example-code"></code>（标签名可改，见下方「标记设置」）。</li>'
-      + '        <li>聊天界面渲染这行文字时会显示成一张随机挑的图片。</li>'
+      + '        <li>新建一个关键词（例如「挠头」），再点它的「加图/视频」按钮选中素材。素材多的可以用「按文件夹导入」，子文件夹名会自动成为关键词。</li>'
+      + '        <li>让回复里出现标记：图片写 <code class="' + PREFIX + 'example-code"></code>，视频写 <code class="' + PREFIX + 'example-code-v"></code>。</li>'
+      + '        <li>渲染时标记会变成随机挑中的素材：图片直接显示，视频先显示首帧、点一下才开始播放。</li>'
       + '      </ol>'
-      + '      <div class="' + PREFIX + 'hint">消息原文不会被改动：点「编辑」看到的仍然是纯文字，图片只是显示效果。</div>'
+      + '      <div class="' + PREFIX + 'hint">消息原文不会被改动：点「编辑」看到的仍然是纯文字，图片和视频只是显示效果。两个标记的名字都可以在下方「标记设置」里改。</div>'
       + '    </div>'
 
       // —— 关键词与图片库 ——
@@ -312,7 +323,8 @@
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="import-folder">' + icon('folder') + '按文件夹导入</button>'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="resync-folder">从上次的文件夹重新同步</button>'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会替换整个图片库：所选目录下每个子文件夹名就是一个关键词，写成「挠头|摸摸头」表示几种写法都认。本机不支持选择文件夹时会自动改成选图片。</div>'
+      + '      <div class="' + PREFIX + 'hint">「按文件夹导入」会替换整个素材库：所选目录下每个子文件夹名就是一个关键词，写成「挠头|摸摸头」表示几种写法都认。本机不支持选择文件夹时会自动改成多选。'
+      + '<br>图片支持 png / jpg / gif / webp / avif / bmp / svg；视频支持 mp4 / webm / mov（浏览器自带的解码器放不了的格式，例如 mkv、avi，导入时会跳过并告诉你）。</div>'
       + '      <div class="' + PREFIX + 'newkw" id="' + PREFIX + 'newkw" hidden>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic-newkw maxlength="60" spellcheck="false" autocomplete="off" placeholder="例如 挠头；多个写法写 挠头|摸摸头">'
       + '        <button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-new-ok">创建</button>'
@@ -354,17 +366,25 @@
       + '    <div class="' + PREFIX + 'group">'
       + '      <div class="' + PREFIX + 'group-title">标记设置</div>'
       + '      <div class="' + PREFIX + 'row">'
-      + '        <span class="' + PREFIX + 'label">标签名</span>'
+      + '        <span class="' + PREFIX + 'label">图片标记名</span>'
       + '        <input class="' + PREFIX + 'input" type="text" data-lpic="tag" maxlength="16" placeholder="img" spellcheck="false" autocomplete="off">'
       + '      </div>'
-      + '      <div class="' + PREFIX + 'example">当前识别：<code class="' + PREFIX + 'example-code"></code></div>'
-      + '      <div class="' + PREFIX + 'hint">标签名可以改成别的词（例如 localimg），避免与其它插件冲突。标记必须用方括号写成 <code>[标签名]关键词[/标签名]</code>：尖括号会被聊天界面的安全过滤当作 HTML 标签处理，标记会失效。</div>'
+      + '      <div class="' + PREFIX + 'row">'
+      + '        <span class="' + PREFIX + 'label">视频标记名</span>'
+      + '        <input class="' + PREFIX + 'input" type="text" data-lpic="videoTag" maxlength="16" placeholder="video" spellcheck="false" autocomplete="off">'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'example">图片：<code class="' + PREFIX + 'example-code"></code></div>'
+      + '      <div class="' + PREFIX + 'example">视频：<code class="' + PREFIX + 'example-code-v"></code></div>'
+      + '      <div class="' + PREFIX + 'hint" id="' + PREFIX + 'tag-warn" hidden>两个标记不能重名，请改掉其中一个。</div>'
+      + '      <div class="' + PREFIX + 'hint">两个名字都能改（例如 localimg / localvideo），避免与其它插件冲突。标记必须用方括号写成 <code>[名字]关键词[/名字]</code>：尖括号会被聊天界面的安全过滤当作 HTML 标签处理，标记会失效。'
+      + ' <code>[图片标记名]</code> 只会抽到图片，<code>[视频标记名]</code> 只会抽到视频，两者不会混。</div>'
       + '    </div>'
 
       // —— 数据 ——
       + '    <div class="' + PREFIX + 'group">'
       + '      <div class="' + PREFIX + 'group-title">数据</div>'
-      + '      <div class="' + PREFIX + 'hint">导入的图片只保存在本机浏览器数据库里，不上传、不联网。清除浏览器数据、换设备或卸载扩展都会丢失，请保留原始图片文件。</div>'
+      + '      <div class="' + PREFIX + 'hint">导入的素材只保存在本机浏览器数据库里，不上传、不联网。清除浏览器数据、换设备或卸载扩展都会丢失，请保留原始文件。'
+      + '<br>视频比图片大得多，而浏览器本地库容量有限：放几十个大视频可能装不下，建议只放短片段。</div>'
       + '      <div class="' + PREFIX + 'btn-row">'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost ' + PREFIX + 'btn-danger" data-lpic-act="clear">' + icon('trash') + '清空图片库</button>'
       + '      </div>'
@@ -397,8 +417,11 @@
       + '</div>';
   }
 
-  function sampleMarker() {
-    const tag = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
+  /** 面板里显示的标记示例（kind='video' 时给视频标记的示例） */
+  function sampleMarker(kind) {
+    const isVideo = (kind === 'video');
+    const tag = clampTag(isVideo ? settings.videoTag : settings.tag)
+      || (isVideo ? DEFAULT_SETTINGS.videoTag : DEFAULT_SETTINGS.tag);
     return '[' + tag + ']关键词[/' + tag + ']';
   }
 
@@ -423,10 +446,18 @@
       });
     });
 
-    const sample = sampleMarker();
+    const sampleImg = sampleMarker('img');
     panel.querySelectorAll('.' + PREFIX + 'example-code').forEach(function (el) {
-      el.textContent = sample;
+      el.textContent = sampleImg;
     });
+    const sampleVid = sampleMarker('video');
+    panel.querySelectorAll('.' + PREFIX + 'example-code-v').forEach(function (el) {
+      el.textContent = sampleVid;
+    });
+
+    // 两个标记重名时明确提醒（重名会让视频标记失效）
+    const tagWarn = document.getElementById(PREFIX + 'tag-warn');
+    if (tagWarn) tagWarn.hidden = videoTagEnabled();
 
     const hv = document.getElementById(PREFIX + 'h-val');
     if (hv) hv.textContent = settings.imgHeight + 'px';
@@ -449,9 +480,14 @@
     if (!el) return;
     let text;
     if (!indexList.length) {
-      text = '还没导入图片 · 点右侧箭头展开设置';
+      text = '还没导入素材 · 点右侧箭头展开设置';
     } else {
-      text = keywordList.length + ' 个关键词 · ' + indexList.length + ' 张图片';
+      let vids = 0;
+      for (let i = 0; i < indexList.length; i += 1) {
+        if (recordKind(indexList[i]) === 'video') vids += 1;
+      }
+      text = keywordList.length + ' 个关键词 · ' + (indexList.length - vids) + ' 张图片';
+      if (vids) text += ' · ' + vids + ' 个视频';
       if (!settings.enabled) text += ' · 已关闭';
       text += ' · 点右侧箭头展开设置';
     }
@@ -934,17 +970,42 @@
 
   /* ======================= 五、导入与关键词索引 ======================= */
 
-  function isImageFile(f) {
+  /** 这个文件属于哪一类：'img' 图片 / 'video' 可播放视频 / 'badVid' 浏览器放不了的视频 / '' 不认识 */
+  function fileKind(f) {
     try {
-      if (!f) return false;
-      const t = String(f.type || '');
-      if (t.indexOf('image/') === 0) return true;
-      const n = String(f.name || '').toLowerCase();
-      const dot = n.lastIndexOf('.');
-      if (dot < 0) return false;
-      return IMG_EXT.indexOf(n.slice(dot + 1)) >= 0;
+      if (!f) return '';
+      const t = String(f.type || '').toLowerCase();
+      const name = String(f.name || '').toLowerCase();
+      const dot = name.lastIndexOf('.');
+      const ext = dot >= 0 ? name.slice(dot + 1) : '';
+      if (t.indexOf('image/') === 0 || IMG_EXT.indexOf(ext) >= 0) return 'img';
+      if (t.indexOf('video/') === 0) return (VID_EXT_BAD.indexOf(ext) >= 0) ? 'badVid' : 'video';
+      if (VID_EXT.indexOf(ext) >= 0) return 'video';
+      if (VID_EXT_BAD.indexOf(ext) >= 0) return 'badVid';
+      return '';
     } catch (e) {
-      return false;
+      return '';
+    }
+  }
+
+  function isMediaFile(f) {
+    const k = fileKind(f);
+    return k === 'img' || k === 'video';
+  }
+
+  /** 已入库的记录属于哪一类：优先看存的类型，其次看扩展名（老记录没有类型信息时按图片算） */
+  function recordKind(rec) {
+    try {
+      if (!rec) return 'img';
+      const t = String(rec.type || '').toLowerCase();
+      if (t.indexOf('video/') === 0) return 'video';
+      if (t.indexOf('image/') === 0) return 'img';
+      const p = String(rec.path || '').toLowerCase();
+      const dot = p.lastIndexOf('.');
+      const ext = dot >= 0 ? p.slice(dot + 1) : '';
+      return (VID_EXT.indexOf(ext) >= 0) ? 'video' : 'img';
+    } catch (e) {
+      return 'img';
     }
   }
 
@@ -970,7 +1031,11 @@
 
       function collect() {
         try {
-          return Array.prototype.slice.call(input.files || []).filter(isImageFile);
+          // 图片和视频都收；浏览器放不了的视频也收进来，好在导入结果里明确告诉用户为什么没导入
+          return Array.prototype.slice.call(input.files || []).filter(function (f) {
+            const k = fileKind(f);
+            return k === 'img' || k === 'video' || k === 'badVid';
+          });
         } catch (e) {
           return [];
         }
@@ -1019,7 +1084,7 @@
         input = document.createElement('input');
         input.type = 'file';
         input.multiple = true;
-        input.accept = 'image/*';
+        input.accept = 'image/*,video/*';
         if (isDir) {
           input.webkitdirectory = true;
           input.setAttribute('webkitdirectory', '');
@@ -1055,7 +1120,7 @@
   /** 建查询表：关键词由用户定义（权威），图片挂在 keywordList 的 id 上 */
   function buildIndex() {
     keywordMap = new Map();
-    countMap = new Map();
+    countMap = new Map();               // kwId -> { img, video }（只用于展示）
     const byId = new Map();
     for (let i = 0; i < keywordList.length; i += 1) byId.set(keywordList[i].id, keywordList[i]);
 
@@ -1064,7 +1129,11 @@
       if (!rec || !rec.path) continue;
       const k = byId.get(rec.kwId);
       if (!k) continue;                         // 挂在已删除关键词上的记录，忽略
-      countMap.set(rec.kwId, (countMap.get(rec.kwId) || 0) + 1);
+      const kind = recordKind(rec);             // 'img' 或 'video'
+      let c = countMap.get(rec.kwId);
+      if (!c) { c = { img: 0, video: 0 }; countMap.set(rec.kwId, c); }
+      c[kind] += 1;
+
       const names = (k.names && k.names.length) ? k.names : [k.name];
       for (let j = 0; j < names.length; j += 1) {
         const nm = normName(names[j]);
@@ -1072,35 +1141,65 @@
         const key = nm.toLowerCase();
         let entry = keywordMap.get(key);
         if (!entry) {
-          entry = { id: k.id, name: k.name, paths: [] };
+          entry = { id: k.id, name: k.name, paths: [], imgPaths: [], vidPaths: [] };
           keywordMap.set(key, entry);
         }
+        // 图片和视频分开放：写 [img] 只会抽到图片，写 [video] 只会抽到视频
+        const pool = (kind === 'video') ? entry.vidPaths : entry.imgPaths;
+        if (pool.indexOf(rec.path) < 0) pool.push(rec.path);
         if (entry.paths.indexOf(rec.path) < 0) entry.paths.push(rec.path);
       }
     }
   }
 
-  /** 查关键词：命中返回 { name, paths }，未命中返回 null（未命中就保留原文） */
-  function lookupKeyword(kw) {
+  /** 某个关键词下的素材数量（图片与视频分开算） */
+  function kwCounts(id) {
+    const c = countMap.get(id);
+    return c ? c : { img: 0, video: 0 };
+  }
+
+  function kwTotal(id) {
+    const c = kwCounts(id);
+    return c.img + c.video;
+  }
+
+  function kwCountText(id) {
+    const c = kwCounts(id);
+    if (c.img && c.video) return c.img + ' 图 · ' + c.video + ' 视频';
+    if (c.video) return c.video + ' 个视频';
+    return c.img + ' 张';
+  }
+
+  /** 取该关键词下指定类别的素材池 */
+  function poolOf(entry, kind) {
+    if (!entry) return [];
+    return (kind === 'video') ? (entry.vidPaths || []) : (entry.imgPaths || []);
+  }
+
+  /** 查关键词：命中「且该类素材非空」才返回，否则 null（返回 null 就保留原文）。
+   *  kind='img' 只认图片，kind='video' 只认视频 —— 两类从不混。 */
+  function lookupKeyword(kw, kind) {
     const s = String(kw == null ? '' : kw).trim();
     if (!s) return null;
+    const want = (kind === 'video') ? 'video' : 'img';
     if (!settings.caseSensitive) {
       const e = keywordMap.get(s.toLowerCase());
-      return (e && e.paths.length) ? e : null;
+      return (e && poolOf(e, want).length) ? e : null;
     }
     let hit = null;
     keywordMap.forEach(function (e) {
       if (hit || e.name !== s) return;
-      if (e.paths && e.paths.length) hit = e;
+      if (poolOf(e, want).length) hit = e;
     });
     return hit;
   }
 
-  function pickPath(entry, mesId, kw) {
-    if (!entry || !entry.paths || !entry.paths.length) return null;
-    const key = String(mesId) + '|' + String(kw).toLowerCase();
+  function pickPath(entry, mesId, kw, kind) {
+    const pool = poolOf(entry, kind);
+    if (!pool.length) return null;
+    const key = String(mesId) + '|' + String(kw).toLowerCase() + '|' + (kind === 'video' ? 'v' : 'i');
     if (settings.pinPerMessage && pinned.has(key)) return pinned.get(key);
-    const path = entry.paths[Math.floor(Math.random() * entry.paths.length)];
+    const path = pool[Math.floor(Math.random() * pool.length)];
     if (settings.pinPerMessage) pinned.set(key, path);
     return path;
   }
@@ -1131,11 +1230,11 @@
     }
   }
 
-  /** 把一批图片全部导入到指定关键词名下 */
+  /** 把一批素材（图片 + 视频）全部导入到指定关键词名下 */
   async function doImport(files, keywordIdOrName) {
     const kw = getKeyword(keywordIdOrName);
     if (!kw) {
-      setStatus('找不到关键词，请先「新建关键词」再导入图片', 'err');
+      setStatus('找不到关键词，请先「新建关键词」再导入素材', 'err');
       return 0;
     }
 
@@ -1143,38 +1242,60 @@
     const now = Date.now();
     const records = [];
     const list = [];
+    state.lastImportNotes = '';   // 有额外说明（视频体积 / 跳过的格式）时由调用方保留这条提示
+    state.lastImportStats = null;
+    const skipped = [];           // 浏览器放不了的视频等，最后一起说明
     const used = new Set();
+    let vidCount = 0;
+    let vidBytes = 0;
+    let bigCount = 0;
+    let bigBytes = 0;
     for (let i = 0; i < indexList.length; i += 1) used.add(indexList[i].path);
 
     const prefix = 'k/' + kw.id + '/';
 
     for (let i = 0; i < total; i += 1) {
       const f = files[i];
-      const fname = String(f.name || ('image' + i));
+      const kind = fileKind(f);
+      if (kind === 'badVid') {
+        if (skipped.length < 8) skipped.push(String(f.name || '') || '未命名');
+        continue;                                  // 浏览器放不了的格式直接不收，免得正文里出现黑框
+      }
+      if (kind !== 'img' && kind !== 'video') continue;
+
+      const fname = String(f.name || ('media' + i));
       let path = prefix + fname;
       let n = 1;
       while (used.has(path)) { n += 1; path = prefix + n + '_' + fname; }
       used.add(path);
+
+      const size = Number(f.size) || 0;
+      if (kind === 'video') {
+        vidCount += 1;
+        vidBytes += size;
+        if (size >= LARGE_VIDEO_BYTES) { bigCount += 1; bigBytes += size; }
+      }
 
       records.push({
         path: path,
         kwId: kw.id,
         name: fname,
         type: f.type || '',
-        size: f.size || 0,
+        size: size,
         ts: now,
         blob: f,
       });
-      list.push({ path: path, kwId: kw.id, name: fname, size: f.size || 0 });
+      list.push({ path: path, kwId: kw.id, name: fname, size: size });
 
       if (i % 25 === 0) {
-        setStatus('正在读取图片 ' + (i + 1) + ' / ' + total + ' …', 'wait');
+        setStatus('正在读取素材 ' + (i + 1) + ' / ' + total + ' …', 'wait');
         await yieldToUI();
       }
     }
 
     if (!records.length) {
-      setStatus('没有读到可用的图片（支持 png / jpg / gif / webp / avif / bmp / svg）', 'err');
+      setStatus('没有读到可用的素材（图片支持 png/jpg/gif/webp/avif/bmp/svg，视频支持 mp4/webm/mov）'
+        + (skipped.length ? '；已跳过：' + skipped.join('、') : ''), 'err');
       return 0;
     }
 
@@ -1193,14 +1314,52 @@
     }]);
 
     afterLibraryChanged();
-    log('导入完成：', kw.name, list.length, '张，库内共', indexList.length, '张');
+
+    // 导入结果一次说清：视频体积、大文件提醒、被跳过的格式
+    state.lastImportStats = {
+      added: list.length, vid: vidCount, vidBytes: vidBytes,
+      big: bigCount, bigBytes: bigBytes, skipped: skipped.slice(),
+    };
+    const notes = buildImportNotes(state.lastImportStats);
+    if (notes.length) {
+      state.lastImportNotes = notes.join('；');
+      setStatus('已导入 ' + list.length + ' 个素材到「' + kw.name + '」：' + state.lastImportNotes,
+        (bigCount || skipped.length) ? 'err' : 'ok');
+    }
+    log('导入完成：', kw.name, list.length, '个（视频', vidCount, '），库内共', indexList.length, '个');
     return list.length;
+  }
+
+  /** 文件夹导入的最终结果：关键词数、本次导入量、库内图片/视频数，以及体积与跳过格式的说明 */
+  function reportImportResult(prefix, rootName, total) {
+    let imgTotal = 0;
+    let vidTotal = 0;
+    for (let i = 0; i < indexList.length; i += 1) {
+      if (recordKind(indexList[i]) === 'video') { vidTotal += 1; } else { imgTotal += 1; }
+    }
+    let text = prefix + '：' + keywordList.length + ' 个关键词 · 本次导入 ' + total + ' 个素材'
+      + '（库内 ' + imgTotal + ' 图' + (vidTotal ? ' / ' + vidTotal + ' 视频' : '') + '）';
+    const notes = buildImportNotes(state.lastFolderStats);
+    if (notes.length) text += '；' + notes.join('；');
+    setStatus(text, notes.length ? 'err' : 'ok');
+  }
+
+  /** 统一的「这次导入有什么要注意的」文案（单关键词导入与文件夹导入共用） */
+  function buildImportNotes(s) {
+    const notes = [];
+    if (!s) return notes;
+    if (s.vid) notes.push(s.vid + ' 个视频共 ' + fmtSize(s.vidBytes));
+    if (s.big) notes.push('其中 ' + s.big + ' 个较大（合计 ' + fmtSize(s.bigBytes) + '），请注意本地数据库容量');
+    if (s.skipped && s.skipped.length) {
+      notes.push('已跳过 ' + s.skipped.length + ' 个浏览器无法播放的视频：' + s.skipped.join('、'));
+    }
+    return notes;
   }
 
   /** 唯一导入入口：先有目标关键词，再多选图片 */
   async function importFlow(keywordIdOrName) {
     const kw = getKeyword(keywordIdOrName);
-    if (!kw) { setStatus('请先「新建关键词」，再点它的「加图」按钮', 'err'); return; }
+    if (!kw) { setStatus('请先「新建关键词」，再点它的「加图/视频」按钮', 'err'); return; }
     if (isBusy()) {
       setStatus('上一次导入还没结束，点这里可以取消等待', 'wait');
       return;
@@ -1208,7 +1367,7 @@
 
     lockBusy();
     try {
-      setStatus('正在等待选择图片…（点这里取消）', 'wait');
+      setStatus('正在等待选择图片或视频…（点这里取消）', 'wait');
       const files = await pickWithInput();
 
       // 留一份原始信息给「环境探测」，便于判断设备能力
@@ -1226,14 +1385,15 @@
       };
 
       if (!files.length) {
-        setStatus('已取消，没有导入任何图片');
+        setStatus('已取消，没有导入任何素材');
         return;
       }
 
       const added = await doImport(files, kw.id);
-      if (added) {
-        setStatus('已把 ' + added + ' 张图片导入「' + kw.name + '」 · 共 '
-          + keywordList.length + ' 个关键词 / ' + indexList.length + ' 张图', 'ok');
+      // 有视频体积 / 跳过格式之类的说明时，保留 doImport 给的详细提示
+      if (added && !state.lastImportNotes) {
+        setStatus('已把 ' + added + ' 个素材导入「' + kw.name + '」 · 共 '
+          + keywordList.length + ' 个关键词 / ' + indexList.length + ' 个素材', 'ok');
       }
     } catch (e) {
       warn('导入失败', e);
@@ -1259,7 +1419,7 @@
       if (handle.kind === 'file') {
         try {
           const f = await handle.getFile();
-          if (isImageFile(f)) out.push(f);
+          if (isMediaFile(f)) out.push(f);
         } catch (e) { /* 单个文件读不了就跳过 */ }
       } else if (handle.kind === 'directory') {
         await collectDirFiles(handle, out, depth + 1);
@@ -1285,7 +1445,7 @@
       } else if (handle.kind === 'file') {
         try {
           const f = await handle.getFile();
-          if (isImageFile(f)) loose.push(f);
+          if (isMediaFile(f)) loose.push(f);
         } catch (e) { /* ignore */ }
       }
     }
@@ -1319,7 +1479,7 @@
     let totalFiles = 0;
     groups.forEach(function (g) { totalFiles += g.files.length; });
     if (!totalFiles) {
-      setStatus('没找到图片。请把图片放进以关键词命名的子文件夹（例如 根目录/挠头/1.png）', 'err');
+      setStatus('没找到图片或视频。请把素材放进以关键词命名的子文件夹（例如 根目录/挠头/1.png）', 'err');
       return 0;
     }
 
@@ -1333,17 +1493,26 @@
     keywordList = [];
 
     let total = 0;
+    const agg = { added: 0, vid: 0, vidBytes: 0, big: 0, bigBytes: 0, skipped: [] };
     for (let i = 0; i < groups.length; i += 1) {
       const g = groups[i];
       const created = await createKeyword(g.names.join('|'));
       const kw = created.ok ? created.keyword : getKeyword(g.names[0]);
       if (!kw) continue;
-      setStatus('正在导入「' + kw.name + '」的 ' + g.files.length + ' 张图…', 'wait');
+      setStatus('正在导入「' + kw.name + '」的 ' + g.files.length + ' 个素材…', 'wait');
       total += await doImport(g.files, kw.id);
+      const s = state.lastImportStats;                 // 汇总各关键词的说明，最后一起报
+      if (s) {
+        agg.vid += s.vid; agg.vidBytes += s.vidBytes;
+        agg.big += s.big; agg.bigBytes += s.bigBytes;
+        (s.skipped || []).forEach(function (n) { if (agg.skipped.length < 8) agg.skipped.push(n); });
+      }
     }
+    agg.added = total;
+    state.lastFolderStats = agg;
 
     afterLibraryChanged();
-    log('按文件夹导入完成：', keywordList.length, '个关键词 /', total, '张图');
+    log('按文件夹导入完成：', keywordList.length, '个关键词 /', total, '个素材');
     return total;
   }
 
@@ -1449,10 +1618,10 @@
       const rootName = String(withPath[0].webkitRelativePath || '').split('/')[0] || '文件夹';
       try { await dbPut(STORE_META, [{ key: META_SOURCE, info: { folder: rootName, kw: keywordList.length, total: total, ts: Date.now() } }]); } catch (e) { /* ignore */ }
       lastImportInfo = { at: Date.now(), count: total, mode: 'folder-path', folder: rootName, samples: [] };
-      setStatus('按文件夹导入完成：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片（文件夹名已作为关键词）', 'ok');
+      reportImportResult('按文件夹导入完成', rootName, total);
     } catch (e) {
       warn('按文件夹导入失败', e);
-      setStatus('按文件夹导入失败：' + (e && e.message ? e.message : e) + '（可改用「加图」多选图片）', 'err');
+      setStatus('按文件夹导入失败：' + (e && e.message ? e.message : e) + '（可改用「加图/视频」多选）', 'err');
     } finally {
       unlockBusy();
     }
@@ -1487,7 +1656,7 @@
       const total = await syncFromRoot(root);
       if (!total) return;
       lastImportInfo = { at: Date.now(), count: total, mode: 'folder', folder: root.name, samples: [] };
-      setStatus('已从「' + (root.name || '文件夹') + '」同步：' + keywordList.length + ' 个关键词 · ' + total + ' 张图片', 'ok');
+      reportImportResult('已从「' + (root.name || '文件夹') + '」同步', root.name, total);
     } catch (e) {
       warn('重新同步失败', e);
       setStatus('重新同步失败：' + (e && e.message ? e.message : e) + '（可重新点「按文件夹导入」）', 'err');
@@ -1568,13 +1737,20 @@
     const kwCount = keywordList.length;
     renderSummary();     // 收起状态下的一行摘要也要跟着更新
     if (!total && !kwCount) {
-      setStatus('还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图」按钮导入图片');
+      setStatus('还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图/视频」按钮导入素材');
       renderKeywordList();
       return;
     }
     let bytes = 0;
-    for (let i = 0; i < indexList.length; i += 1) bytes += Number(indexList[i].size) || 0;
-    setStatus('已就绪：' + kwCount + ' 个关键词 · ' + total + ' 张图片 · 占用 ' + fmtSize(bytes), 'ok');
+    let vids = 0;
+    for (let i = 0; i < indexList.length; i += 1) {
+      bytes += Number(indexList[i].size) || 0;
+      if (recordKind(indexList[i]) === 'video') vids += 1;
+    }
+    const imgCount = total - vids;
+    let parts = imgCount + ' 张图片';
+    if (vids) parts += ' · ' + vids + ' 个视频';
+    setStatus('已就绪：' + kwCount + ' 个关键词 · ' + parts + ' · 占用 ' + fmtSize(bytes), 'ok');
     renderKeywordList();
   }
 
@@ -1585,12 +1761,12 @@
 
     if (countEl) countEl.textContent = String(keywordList.length);
     if (!keywordList.length) {
-      listEl.innerHTML = '<div class="' + PREFIX + 'kw-empty">还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图」按钮导入图片。</div>';
+      listEl.innerHTML = '<div class="' + PREFIX + 'kw-empty">还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图/视频」按钮导入素材。</div>';
       return;
     }
 
     listEl.innerHTML = keywordList.map(function (k) {
-      const n = countMap.get(k.id) || 0;
+      const n = kwTotal(k.id);
       const id = esc(k.id);
       const alias = (k.names && k.names.length > 1)
         ? '<span class="' + PREFIX + 'kw-alias">也认：' + k.names.slice(1).map(esc).join(' / ') + '</span>'
@@ -1598,12 +1774,12 @@
       return '<div class="' + PREFIX + 'kw-row" data-kw-id="' + id + '">'
         + '<div class="' + PREFIX + 'kw-main">'
         + '<span class="' + PREFIX + 'kw-name">' + esc(k.name) + '</span>'
-        + '<span class="' + PREFIX + 'kw-num">' + n + ' 张</span>'
+        + '<span class="' + PREFIX + 'kw-num">' + esc(kwCountText(k.id)) + '</span>'
         + alias
         + '</div>'
         + '<div class="' + PREFIX + 'kw-acts">'
-        + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-add" data-kw-id="' + id + '">' + icon('plus') + '加图</button>'
-        + (n ? '<button class="' + PREFIX + 'icon-btn" title="试看一张" data-lpic-act="kw-preview" data-kw-id="' + id + '">' + icon('eye') + '</button>' : '')
+        + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-add" data-kw-id="' + id + '">' + icon('plus') + '加图/视频</button>'
+        + (n ? '<button class="' + PREFIX + 'icon-btn" title="试看一个" data-lpic-act="kw-preview" data-kw-id="' + id + '">' + icon('eye') + '</button>' : '')
         + '<button class="' + PREFIX + 'icon-btn" title="改名" data-lpic-act="kw-rename" data-kw-id="' + id + '">' + icon('pen') + '</button>'
         + '<button class="' + PREFIX + 'icon-btn ' + PREFIX + 'icon-danger" title="删除" data-lpic-act="kw-del" data-kw-id="' + id + '">' + icon('trash') + '</button>'
         + '</div>'
@@ -1735,12 +1911,12 @@
     const box = row.querySelector('.' + PREFIX + 'kw-confirm');
     if (!box) return;
 
-    const n = countMap.get(k.id) || 0;
+    const n = kwTotal(k.id);
     const others = keywordList.filter(function (x) { return x.id !== k.id; });
     const idAttr = esc(k.id);
 
     let html = '<span class="' + PREFIX + 'confirm-text">'
-      + (n ? ('「' + esc(k.name) + '」下面还有 ' + n + ' 张图片，要如何处理？')
+      + (n ? ('「' + esc(k.name) + '」下面还有 ' + n + ' 个素材，要如何处理？')
         : ('删除空关键词「' + esc(k.name) + '」？'))
       + '</span><div class="' + PREFIX + 'confirm-acts">';
 
@@ -1867,8 +2043,21 @@
   }
 
   /** 按标签名现建正则（每次新建，避免 /g 的 lastIndex 陷阱）。只认方括号写法 */
-  function buildRegex() {
-    const tag = escapeRe(clampTag(settings.tag) || DEFAULT_SETTINGS.tag);
+  /** 视频标记是否可用：留空、或与图片标记同名（会互相打架）时视为不可用 */
+  function videoTagEnabled() {
+    const v = clampTag(settings.videoTag);
+    if (!v) return false;
+    const i = clampTag(settings.tag) || DEFAULT_SETTINGS.tag;
+    return v.toLowerCase() !== i.toLowerCase();
+  }
+
+  /** 按类别现建正则：kind='img' 用图片标记，kind='video' 用视频标记。
+   *  两类各认各的标记，从不混用（[img] 只会出图片，[video] 只会出视频）。 */
+  function buildRegex(kind) {
+    const isVideo = (kind === 'video');
+    if (isVideo && !videoTagEnabled()) return null;
+    const raw = isVideo ? settings.videoTag : (clampTag(settings.tag) || DEFAULT_SETTINGS.tag);
+    const tag = escapeRe(clampTag(raw) || DEFAULT_SETTINGS.tag);
     return new RegExp('\\[\\s*' + tag + '\\s*\\]([^\\n]{1,60}?)\\[\\s*\\/\\s*' + tag + '\\s*\\]', 'g');
   }
 
@@ -1998,10 +2187,15 @@
     return (now - rec.since) >= STREAM_SETTLE_MS;
   }
 
-  /** 正文里是否还有「等着被换成图」的标记（已经换好的不算，避免白白空转） */
+  /** 正文里是否还有「等着被换成图/视频」的标记（已经换好的不算，避免白白空转） */
   function markerMaybePresent(textEl) {
     try {
-      return buildRegex().test(textEl.textContent || '');
+      const t = textEl.textContent || '';
+      const reImg = buildRegex('img');
+      if (reImg && reImg.test(t)) return true;
+      const reVid = buildRegex('video');
+      if (reVid && reVid.test(t)) return true;
+      return false;
     } catch (e) {
       return false;
     }
@@ -2026,77 +2220,127 @@
     } catch (e) { /* ignore */ }
   }
 
-  function makeImageNode(entry, mesId, kw, raw) {
+  /** 生成一个素材节点：图片直接显示；视频先显示首帧 + 播放按钮，点了才播 */
+  function makeMediaNode(entry, mesId, kw, raw, kind) {
+    const isVideo = (kind === 'video');
     const wrap = document.createElement('span');
-    wrap.className = PREFIX + (settings.blockMode ? 'block' : 'inline');
+    wrap.className = PREFIX + (settings.blockMode ? 'block' : 'inline') + (isVideo ? (' ' + PREFIX + 'media-vid') : '');
     wrap.setAttribute('data-lpic-kw', kw);
     wrap.setAttribute('data-lpic-raw', raw);
+    wrap.setAttribute('data-lpic-kind', isVideo ? 'video' : 'img');
 
-    const img = document.createElement('img');
-    img.className = PREFIX + 'img';
-    img.alt = kw;
-    img.decoding = 'async';
-    img.draggable = false;
-    img.style.height = settings.imgHeight + 'px';
-    img.style.cursor = settings.lightbox ? 'zoom-in' : 'default';
-    wrap.appendChild(img);
+    let el;
+    if (isVideo) {
+      el = document.createElement('video');
+      el.className = PREFIX + 'vid';
+      el.preload = 'metadata';                 // 只读元数据与首帧，不把整个视频拉进来
+      el.controls = false;                     // 点了播放才给进度条
+      try { el.playsInline = true; } catch (e) { /* ignore */ }
+      el.setAttribute('playsinline', '');
+      el.setAttribute('webkit-playsinline', '');
+      el.setAttribute('preload', 'metadata');
+    } else {
+      el = document.createElement('img');
+      el.className = PREFIX + 'img';
+      el.alt = kw;
+      el.decoding = 'async';
+      el.draggable = false;
+    }
+    el.style.height = settings.imgHeight + 'px';
+    el.style.maxWidth = '100%';
+    el.style.cursor = (isVideo || settings.lightbox) ? 'zoom-in' : 'default';
+    wrap.appendChild(el);
 
-    const path = pickPath(entry, mesId, kw);
+    if (isVideo) {
+      const play = document.createElement('span');
+      play.className = PREFIX + 'play';
+      play.setAttribute('data-lpic-media', 'play');
+      play.setAttribute('role', 'button');
+      play.setAttribute('aria-label', '播放视频');
+      play.innerHTML = icon('play');
+      wrap.appendChild(play);
+
+      const zoom = document.createElement('span');
+      zoom.className = PREFIX + 'zoom';
+      zoom.setAttribute('data-lpic-media', 'open');
+      zoom.setAttribute('role', 'button');
+      zoom.setAttribute('aria-label', '放大播放');
+      zoom.innerHTML = icon('expand');
+      wrap.appendChild(zoom);
+    }
+
+    const path = pickPath(entry, mesId, kw, kind);
     if (!path) return document.createTextNode(raw);
 
-    log('插入插图：关键词=' + kw + ' 图片=' + path);
+    log('插入素材：类型=' + (isVideo ? '视频' : '图片') + ' 关键词=' + kw + ' 文件=' + path);
     getUrl(path).then(function (url) {
       if (!url) {
         state.stats.fails += 1;
-        state.stats.lastErr = '图片读取失败：' + path;
-        warn('图片读取失败', path);
+        state.stats.lastErr = '素材读取失败：' + path;
+        warn('素材读取失败', path);
         toFailText(wrap, raw);
         scheduleFailRetry();
         return;
       }
-      img.addEventListener('load', function () {
-        wrap.classList.add(PREFIX + 'ready');
-        log('插图已加载：' + path + ' (' + img.naturalWidth + 'x' + img.naturalHeight + ')');
-      });
-      img.addEventListener('error', function () {
+
+      el.addEventListener('error', function () {
         state.stats.fails += 1;
-        state.stats.lastErr = '图片解码失败：' + path;
-        warn('图片解码失败', path);
+        state.stats.lastErr = (isVideo ? '视频无法播放：' : '图片解码失败：') + path;
+        warn(isVideo ? '视频无法播放（多半是浏览器不支持的编码格式）' : '图片解码失败', path);
         toFailText(wrap, raw);
         scheduleFailRetry();
       });
-      img.src = url;
-      if (img.complete && img.naturalWidth) wrap.classList.add(PREFIX + 'ready');
 
-      // 5 秒后自查：图没出来就把现场状态记进日志（手机上看不到控制台，只能靠这个取证）
+      if (isVideo) {
+        el.addEventListener('loadedmetadata', function () {
+          log('视频已就绪：' + path + ' (' + el.videoWidth + 'x' + el.videoHeight + ')');
+          // 少数环境下要挪一下播放位置才会画出首帧
+          try { if (!el.videoWidth) el.currentTime = 0.001; } catch (e) { /* ignore */ }
+        });
+        el.addEventListener('loadeddata', function () { wrap.classList.add(PREFIX + 'ready'); });
+        el.addEventListener('ended', function () {          // 放完恢复成「点一下才播」的样子
+          wrap.classList.remove(PREFIX + 'playing');
+          try { el.controls = false; } catch (e) { /* ignore */ }
+        });
+      } else {
+        el.addEventListener('load', function () {
+          wrap.classList.add(PREFIX + 'ready');
+          log('插图已加载：' + path + ' (' + el.naturalWidth + 'x' + el.naturalHeight + ')');
+        });
+      }
+
+      el.src = url;
+      if (!isVideo && el.complete && el.naturalWidth) wrap.classList.add(PREFIX + 'ready');
+
+      // 5 秒后自查：素材没出来就把现场状态记进日志（手机上看不到控制台，只能靠这个取证）
       setTimeout(function () {
         try {
-          if (img.naturalWidth > 0) {
-            // 图其实已经好了，只是加载事件没触发到 —— 把 ready 补上，别让它一直停在透明状态
+          const ok = isVideo ? (el.readyState >= 1 || el.videoWidth > 0) : (el.naturalWidth > 0);
+          if (ok) {
             if (!wrap.classList.contains(PREFIX + 'ready')) {
               wrap.classList.add(PREFIX + 'ready');
-              log('插图补上 ready 标记（加载事件未触发）：' + path);
+              log('素材补上 ready 标记（加载事件未触发）：' + path);
             }
             return;
           }
           if (!wrap.parentNode) return;          // 已经被还原成文字了，不用管
-          warn('插图自查异常：' + JSON.stringify({
+          warn('素材自查异常：' + JSON.stringify({
             path: path,
-            hasSrc: !!img.getAttribute('src'),
-            srcHead: String(img.getAttribute('src') || '').slice(0, 24),
-            complete: img.complete,
-            natural: img.naturalWidth + 'x' + img.naturalHeight,
+            isVideo: isVideo,
+            hasSrc: !!el.getAttribute('src'),
+            srcHead: String(el.getAttribute('src') || '').slice(0, 24),
+            readyState: el.readyState,
+            size: isVideo ? (el.videoWidth + 'x' + el.videoHeight) : (el.naturalWidth + 'x' + el.naturalHeight),
             wrap: wrap.className,
-            wrapH: Math.round(wrap.getBoundingClientRect().height),
             dbReady: state.dbReady,
             urls: urlCache.size,
           }));
           urlCache.delete(path);               // 丢掉可能失效的缓存，强制重取一次
           getUrl(path).then(function (u2) {
-            if (!u2) { warn('插图重取失败：' + path); return; }
-            if (u2 !== img.getAttribute('src')) {
-              img.src = u2;
-              log('插图已重新取图：' + path);
+            if (!u2) { warn('素材重取失败：' + path); return; }
+            if (u2 !== el.getAttribute('src')) {
+              el.src = u2;
+              log('素材已重新取回：' + path);
             }
           });
         } catch (e) { /* ignore */ }
@@ -2110,24 +2354,33 @@
     const text = node.nodeValue;
     if (!text) return;
 
-    const matches = Array.from(text.matchAll(buildRegex()));
-    if (!matches.length) return;
+    // 图片标记与视频标记各扫一遍，再按出现位置合并（这样两种标记可以混在正文任意位置）
+    const hits = [];
+    ['img', 'video'].forEach(function (kind) {
+      const re = buildRegex(kind);
+      if (!re) return;
+      const ms = Array.from(text.matchAll(re));
+      for (let i = 0; i < ms.length; i += 1) hits.push({ kind: kind, m: ms[i] });
+    });
+    if (!hits.length) return;
+    hits.sort(function (a, b) { return a.m.index - b.m.index; });
 
     const frag = document.createDocumentFragment();
     let last = 0;
     let changed = 0;
 
-    for (let i = 0; i < matches.length; i += 1) {
-      const m = matches[i];
-      const kwRaw = (m[1] !== undefined) ? m[1] : '';
-      const kw = String(kwRaw).trim();
-      const entry = lookupKeyword(kw);
-      if (!entry) continue;                       // 没有对应图片目录 → 原样保留
+    for (let i = 0; i < hits.length; i += 1) {
+      const kind = hits[i].kind;
+      const m = hits[i].m;
+      if (m.index < last) continue;               // 与上一处范围重叠，跳过
+      const kw = String(m[1] == null ? '' : m[1]).trim();
+      const entry = lookupKeyword(kw, kind);
+      if (!entry) continue;                       // 该类素材没有对应的 → 原样保留
 
       const idx = m.index;
       const raw = m[0];
       if (idx > last) frag.appendChild(document.createTextNode(text.slice(last, idx)));
-      frag.appendChild(makeImageNode(entry, mesId, kw, raw));
+      frag.appendChild(makeMediaNode(entry, mesId, kw, raw, kind));
       last = idx + raw.length;
       changed += 1;
     }
@@ -2236,6 +2489,11 @@
       const nodes = Array.prototype.slice.call(document.querySelectorAll(sel));
       for (let i = 0; i < nodes.length; i += 1) {
         const n = nodes[i];
+        // 视频要先停掉，否则还原成文字后声音可能还在响
+        try {
+          const v = n.querySelector ? n.querySelector('video') : null;
+          if (v) { v.pause(); v.removeAttribute('src'); }
+        } catch (e) { /* ignore */ }
         replaceWithText(n, n.getAttribute('data-lpic-raw') || n.textContent || '');
       }
       if (nodes.length) log('已还原', nodes.length, '处插图');
@@ -2400,6 +2658,10 @@
         imgs[i].style.height = settings.imgHeight + 'px';
         imgs[i].style.cursor = settings.lightbox ? 'zoom-in' : 'default';
       }
+      const vids = document.querySelectorAll('video.' + PREFIX + 'vid');
+      for (let i = 0; i < vids.length; i += 1) {
+        vids[i].style.height = settings.imgHeight + 'px';
+      }
       const wraps = document.querySelectorAll('.' + PREFIX + 'block, .' + PREFIX + 'inline');
       for (let i = 0; i < wraps.length; i += 1) {
         wraps[i].classList.toggle(PREFIX + 'block', !!settings.blockMode);
@@ -2430,7 +2692,7 @@
       }
       if (!settings.enabled) return;
       if (key === '__all__') { pinned.clear(); rebuildRendered(false); applyDisplay(); return; }
-      if (key === 'tag') { scheduleRebuild(); return; }
+      if (key === 'tag' || key === 'videoTag') { scheduleRebuild(); return; }
       if (key === 'imgHeight' || key === 'blockMode' || key === 'lightbox') { applyDisplay(); return; }
       if (key === 'applyToUser' || key === 'skipCode') { rebuildRendered(false); return; }
       if (key === 'caseSensitive') { pinned.clear(); rebuildRendered(false); return; }
@@ -2449,7 +2711,9 @@
       lb = document.createElement('div');
       lb.id = PREFIX + 'lb';
       lb.className = PREFIX + 'lb';
-      lb.innerHTML = '<img alt=""><button class="' + PREFIX + 'lb-close" data-lpic-act="lb-close" aria-label="关闭">'
+      // 图片与视频共用一个放大层，按需要显示其中一个
+      lb.innerHTML = '<img alt=""><video controls playsinline webkit-playsinline hidden></video>'
+        + '<button class="' + PREFIX + 'lb-close" data-lpic-act="lb-close" aria-label="关闭">'
         + icon('close') + '</button>';
       document.body.appendChild(lb);
       lb.addEventListener('click', function (e) {
@@ -2467,12 +2731,32 @@
     return lb;
   }
 
-  function openLightbox(url, alt) {
+  function openLightbox(url, alt, kind) {
     if (!url) return;
     const lb = ensureLightbox();
     if (!lb) return;
+    const isVideo = (kind === 'video');
     const img = lb.querySelector('img');
-    if (img) { img.src = url; img.alt = alt || ''; }
+    const vid = lb.querySelector('video');
+
+    if (isVideo) {
+      if (img) { img.hidden = true; img.removeAttribute('src'); }
+      if (vid) {
+        vid.hidden = false;
+        vid.src = url;
+        try {
+          const p = vid.play();
+          if (p && typeof p.catch === 'function') p.catch(function () { /* 需要用户再点一次播放 */ });
+        } catch (e) { /* ignore */ }
+      }
+    } else {
+      if (vid) {
+        try { vid.pause(); } catch (e) { /* ignore */ }
+        vid.hidden = true;
+        vid.removeAttribute('src');
+      }
+      if (img) { img.hidden = false; img.src = url; img.alt = alt || ''; }
+    }
     lb.classList.add(PREFIX + 'open');
   }
 
@@ -2481,22 +2765,34 @@
     if (!lb) return;
     lb.classList.remove(PREFIX + 'open');
     const img = lb.querySelector('img');
-    if (img) {
-      setTimeout(function () {
-        try { img.removeAttribute('src'); } catch (e) { /* ignore */ }
-      }, 220);
+    const vid = lb.querySelector('video');
+    if (vid) {
+      try { vid.pause(); } catch (e) { /* ignore */ }
     }
+    setTimeout(function () {
+      try { if (img) img.removeAttribute('src'); } catch (e) { /* ignore */ }
+      try { if (vid) vid.removeAttribute('src'); } catch (e) { /* ignore */ }
+    }, 220);
   }
 
+  /** 从路径判断这是图片还是视频（预览 / 放大时用） */
+  function pathKind(path) {
+    const p = String(path || '').toLowerCase();
+    const dot = p.lastIndexOf('.');
+    const ext = dot >= 0 ? p.slice(dot + 1) : '';
+    return (VID_EXT.indexOf(ext) >= 0) ? 'video' : 'img';
+  }
+
+  /** 试看：随机抽一个素材，图片直接放大、视频用播放器打开 */
   function previewKeywordById(id) {
     const k = getKeyword(id);
     if (!k) { setStatus('这个关键词已经不在了', 'err'); return; }
     const paths = pathsOfKeyword(k.id);
-    if (!paths.length) { setStatus('「' + k.name + '」下面还没有图片，点「加图」加几张吧', 'err'); return; }
+    if (!paths.length) { setStatus('「' + k.name + '」下面还没有素材，点「加图/视频」加一些吧', 'err'); return; }
     const path = paths[Math.floor(Math.random() * paths.length)];
     getUrl(path).then(function (url) {
-      if (url) openLightbox(url, k.name);
-      else setStatus('图片读取失败：' + path, 'err');
+      if (url) openLightbox(url, k.name, pathKind(path));
+      else setStatus('素材读取失败：' + path, 'err');
     });
   }
 
@@ -2670,7 +2966,12 @@
     }
     lines.push('');
     lines.push('【运行环境】');
-    lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + indexList.length + ' 张');
+    let vidsInLib = 0;
+    for (let i = 0; i < indexList.length; i += 1) {
+      if (recordKind(indexList[i]) === 'video') vidsInLib += 1;
+    }
+    lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + (indexList.length - vidsInLib) + ' 张'
+      + (vidsInLib ? (' / 视频 ' + vidsInLib + ' 个') : ''));
     lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
     lines.push('· 酒馆事件系统可用：' + ((getEventSource() && getEventTypes()) ? '是' : '否'));
     lines.push('· 文件夹导入：' + (state.dirPickerBlocked
@@ -2738,17 +3039,68 @@
     setStatus('日志已显示在下方，可点「复制」', 'ok');
   }
 
-  /** 页面级委托：点正文里的插图 → 放大查看 */
+  /** 点视频上的播放按钮 → 就地播放（带声音、带进度条） */
+  function playInlineVideo(hit) {
+    const wrap = hit && hit.closest ? hit.closest('.' + PREFIX + 'media-vid') : null;
+    const vid = wrap ? wrap.querySelector('video') : null;
+    if (!vid) return null;
+    wrap.classList.add(PREFIX + 'playing');
+    try { vid.controls = true; } catch (e) { /* ignore */ }
+    try {
+      const p = vid.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch(function () { warn('视频播放被拒绝，可在放大层里手动点播放'); });
+      }
+    } catch (e) {
+      warn('视频播放失败', e);
+    }
+    return vid;
+  }
+
+  /** 页面级委托：点图片放大、点视频播放 / 放大播放 */
   function onDocClick(e) {
     try {
       const t = e.target;
       if (!t || !t.closest) return;
-      const img = t.closest('img.' + PREFIX + 'img');
-      if (img && settings.lightbox && img.getAttribute('src')) {
-        openLightbox(img.getAttribute('src'), img.getAttribute('alt') || '');
+
+      const playHit = t.closest('[data-lpic-media="play"]');
+      if (playHit) {
+        playInlineVideo(playHit);
         e.preventDefault();
         return;
       }
+
+      const openHit = t.closest('[data-lpic-media="open"]');
+      if (openHit) {
+        const wrap = openHit.closest('.' + PREFIX + 'media-vid');
+        const vid = wrap ? wrap.querySelector('video') : null;
+        const src = vid ? vid.getAttribute('src') : '';
+        if (src) {
+          try { vid.pause(); } catch (err) { /* ignore */ }   // 就地播放的换到放大层播，避免两处同时响
+          openLightbox(src, wrap.getAttribute('data-lpic-kw') || '', 'video');
+        }
+        e.preventDefault();
+        return;
+      }
+
+      // 视频本体：没在播放就当成「播放」用；正在播放时交给原生控件
+      const vidEl = t.closest('video.' + PREFIX + 'vid');
+      if (vidEl) {
+        const wrap = vidEl.closest('.' + PREFIX + 'media-vid');
+        if (wrap && !wrap.classList.contains(PREFIX + 'playing')) {
+          playInlineVideo(vidEl);
+          e.preventDefault();
+        }
+        return;
+      }
+
+      const img = t.closest('img.' + PREFIX + 'img');
+      if (img && settings.lightbox && img.getAttribute('src')) {
+        openLightbox(img.getAttribute('src'), img.getAttribute('alt') || '', 'img');
+        e.preventDefault();
+        return;
+      }
+
       const lb = document.getElementById(PREFIX + 'lb');
       if (lb && t === lb && lb.classList.contains(PREFIX + 'open')) closeLightbox();
     } catch (err) {
@@ -2890,7 +3242,7 @@
         lookupKeyword: lookupKeyword,
         keywords: function () {
           return keywordList.map(function (k) {
-            return { id: k.id, name: k.name, names: k.names, count: countMap.get(k.id) || 0 };
+            return { id: k.id, name: k.name, names: k.names, count: kwTotal(k.id) };
           });
         },
         lookupTable: function () {
