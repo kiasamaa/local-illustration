@@ -846,24 +846,33 @@
 .lpic-block.lpic-playing .lpic-zoom,
 .lpic-inline.lpic-playing .lpic-zoom { display: none; }   /* 播放时别挡住进度条 */
 
-/* ------------------------------ 4. 放大遮罩 ------------------------------ */
+/* ------------------------------ 4. 放大遮罩 ------------------------------
+ * 尺寸由脚本按「看得见的视口」实测后写成像素（见 fitLightbox），
+ * 不用 vh/vw、也不用 inset —— 手机上这几样常常和实际可见区域对不齐，
+ * 会出现图片贴顶被裁、关闭键落到酒馆顶部栏的情况。
+ * 关闭键放在底部，离顶部栏远远的，绝不会点到酒馆的界面。
+ * ---------------------------------------------------------------------- */
 .lpic-lb {
   position: fixed;
-  inset: 0;
+  left: 0;
+  top: 0;
   z-index: 2000001;
   display: none;
   align-items: center;
   justify-content: center;
-  padding: 4vh 4vw;
-  background: rgba(9, 10, 13, .84);
+  padding: 16px 12px 92px;     /* 下方留给关闭键 */
+  box-sizing: border-box;
+  background: rgba(9, 10, 13, .87);
   -webkit-backdrop-filter: blur(7px);
   backdrop-filter: blur(7px);
+  overscroll-behavior: contain;   /* 不让后面的页面跟着滚 */
+  touch-action: manipulation;
 }
 .lpic-lb.lpic-open { display: flex; animation: lpic-fade .18s ease both; }
 .lpic-lb > img,
 .lpic-lb > video {
-  max-width: 92vw !important;
-  max-height: 88vh !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
   width: auto !important;
   height: auto !important;
   border-radius: 12px;
@@ -876,20 +885,26 @@
 .lpic-lb > video[hidden] { display: none !important; }
 .lpic-lb-close {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 42px; height: 42px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, .18);
-  background: rgba(35, 38, 45, .82);
+  gap: 7px;
+  min-width: 112px;
+  height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: rgba(35, 38, 45, .9);
   color: var(--lpic-txt);
+  font-size: 14px;
   cursor: pointer;
-  transition: transform .15s ease, background .18s ease, color .18s ease;
+  transition: background .18s ease, color .18s ease, transform .15s ease;
+  -webkit-tap-highlight-color: transparent;
 }
-.lpic-lb-close:active { transform: scale(.92); }
+.lpic-lb-close:active { transform: translateX(-50%) scale(.95); }
 .lpic-lb-close:hover { background: rgba(224, 164, 88, .22); color: var(--lpic-acc-2); }
 
 /* ------------------------------ 动画 ------------------------------ */

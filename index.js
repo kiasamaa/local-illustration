@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.7.0';
+  const VERSION = '1.7.1';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -79,6 +79,7 @@
     mountTimer: 0,
     armClear: 0,
     armMedia: 0,        // 素材清单里「再点一次删除」的计时器
+    lbBox: null,        // 放大层最近一次实测到的可见区域
     generating: false,
     generatingSince: 0, // 从什么时候开始处于生成中（用来识别卡死状态）
     deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
@@ -2841,10 +2842,10 @@
       lb = document.createElement('div');
       lb.id = PREFIX + 'lb';
       lb.className = PREFIX + 'lb';
-      // 图片与视频共用一个放大层，按需要显示其中一个
+      // 图片与视频共用一个放大层，按需要显示其中一个；关闭键放在底部（远离酒馆的顶部栏）
       lb.innerHTML = '<img alt=""><video controls playsinline webkit-playsinline hidden></video>'
-        + '<button class="' + PREFIX + 'lb-close" data-lpic-act="lb-close" aria-label="关闭">'
-        + icon('close') + '</button>';
+        + '<button class="' + PREFIX + 'lb-close" data-lpic-act="lb-close" aria-label="关闭大图">'
+        + icon('close') + '关闭</button>';
       document.body.appendChild(lb);
       lb.addEventListener('click', function (e) {
         const hitClose = e.target.closest ? e.target.closest('[data-lpic-act="lb-close"]') : null;
@@ -2854,6 +2855,14 @@
         }
         e.stopPropagation();
       });
+      // 手势也别让它漏到酒馆界面（有的壳在 document 上监听，会误收起扩展栏）
+      ['pointerdown', 'touchstart', 'mousedown'].forEach(function (t) {
+        try {
+          lb.addEventListener(t, function (e) {
+            try { e.stopPropagation(); } catch (err) { /* ignore */ }
+          }, true);
+        } catch (err) { /* ignore */ }
+      });
     } catch (e) {
       warn('创建放大层失败', e);
       return null;
@@ -2861,10 +2870,40 @@
     return lb;
   }
 
+  /** 把放大层精确贴在「看得见的视口」上。
+   *  手机上 vh/vw 与 inset 常常和实际可见区域对不齐（会出现图片贴顶被裁、
+   *  关闭键落到酒馆顶部栏的情况），所以这里实测尺寸后写成像素。 */
+  function fitLightbox(lb) {
+    if (!lb) return;
+    try {
+      const vv = window.visualViewport;
+      const de = document.documentElement;
+      const w = Math.round((vv && vv.width) || window.innerWidth || (de && de.clientWidth) || 360);
+      const h = Math.round((vv && vv.height) || window.innerHeight || (de && de.clientHeight) || 640);
+      const left = Math.round((vv && vv.offsetLeft) || 0);
+      const top = Math.round((vv && vv.offsetTop) || 0);
+      lb.style.left = left + 'px';
+      lb.style.top = top + 'px';
+      lb.style.width = w + 'px';
+      lb.style.height = h + 'px';
+      state.lbBox = { w: w, h: h, left: left, top: top };
+    } catch (e) { /* 量不到就退回 CSS 的默认值 */ }
+  }
+
+  /** 视口变化（旋转、地址栏收起等）时重新贴一次 */
+  function onLbViewportChange() {
+    try {
+      const lb = document.getElementById(PREFIX + 'lb');
+      if (!lb || !lb.classList.contains(PREFIX + 'open')) return;
+      fitLightbox(lb);
+    } catch (e) { /* ignore */ }
+  }
+
   function openLightbox(url, alt, kind) {
     if (!url) return;
     const lb = ensureLightbox();
     if (!lb) return;
+    fitLightbox(lb);
     const isVideo = (kind === 'video');
     const img = lb.querySelector('img');
     const vid = lb.querySelector('video');
@@ -3439,6 +3478,14 @@
     docBound = true;
     document.addEventListener('click', onDocClick);
     document.addEventListener('keydown', onKeyDown);
+    // 屏幕旋转 / 视口变化时，把放大层重新贴到可见区域
+    try { window.addEventListener('resize', onLbViewportChange); } catch (e) { /* ignore */ }
+    try { window.addEventListener('orientationchange', onLbViewportChange); } catch (e) { /* ignore */ }
+    try {
+      if (window.visualViewport && window.visualViewport.addEventListener) {
+        window.visualViewport.addEventListener('resize', onLbViewportChange);
+      }
+    } catch (e) { /* ignore */ }
   }
 
   /** 全量重扫（合并成一次）。force=true 表示「现在已经确定不是在输出中」，可以立刻插图。
