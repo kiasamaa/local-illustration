@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.1';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -32,7 +32,8 @@
 
   const PICK_TIMEOUT_MS = 90000;   // 选择器硬超时：到点必然结算，绝不留下悬空状态
   const BUSY_MAX_MS = 60000;       // 导入锁最长持有时长，超时自动解锁
-  const GEN_MAX_DEFER_MS = 5000;   // 因为「正在生成」而推迟渲染的最长时间，超过就直接渲染（宁可闪一下也要出图）
+  const GEN_MAX_DEFER_MS = 3000;   // 因为「正在生成」而推迟渲染的最长时间（超过就改由「文字是否还在变」来判断）
+  const STREAM_SETTLE_MS = 800;    // 正文安静多久才算本次输出结束（流式出字期间不插图，避免反复闪烁）
   const ASSURE_SCAN_MS = 15000;    // 保命重扫间隔：无论发生什么，最多这么久一定把该出的图补上
   const SCAN_BURST = [600, 1500, 3000, 6000, 12000];   // 启动后补扫的次数与时间点
 
@@ -75,6 +76,7 @@
     generatingSince: 0, // 从什么时候开始处于生成中（用来识别卡死状态）
     deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
     assureTimer: 0,
+    scanAllForce: false, // 下一次全量重扫是否按「确定不在输出中」处理
     failTimer: 0,
     failRetries: 0,
     dbReady: false,
@@ -84,7 +86,7 @@
     dirPickerBlocked: false,     // 实测：系统不允许网页选文件夹
     lastPickerError: null,
     lastFolderTest: null,
-    stats: { hits: 0, fails: 0, scans: 0, lastScanAt: 0, lastErr: '' },
+    stats: { hits: 0, fails: 0, scans: 0, skips: 0, lastScanAt: 0, lastErr: '' },
   };
 
   /** 统一入口：拿酒馆上下文（任何一步都可能不存在，全部兜底） */
@@ -1945,13 +1947,64 @@
     }
     if (!state.deferSince) state.deferSince = Date.now();
     if (Date.now() - state.deferSince > GEN_MAX_DEFER_MS) {
-      log('等生成结束已超过上限，判定为卡住：清除生成标记并直接渲染');
+      log('等生成结束已超过上限，判定为卡住：清除生成标记，改由「文字是否还在变」来判断');
       state.generating = false;
       state.generatingSince = 0;
       state.deferSince = 0;
       return false;
     }
     return true;
+  }
+
+  /* ------------------ 流式输出保护：正文还在变就先不插图 ------------------
+   * 酒馆是流式出字的：每来一个新 token 就会重绘一次正文，我们插进去的图会被冲掉。
+   * 如果这时立刻再插一次，画面就会疯狂闪、还一直换图（对眼睛极不友好）。
+   * 所以：先给正文算一个「原文签名」，签名变了说明还在输出 —— 那就先不动，
+   * 等它安静下来（STREAM_SETTLE_MS 内不再变化）再一次性插图。
+   * 签名把「已渲染成图片的位置」按原始标记来算，所以渲染前后签名一致，不会自己触发自己。
+   * ---------------------------------------------------------------------- */
+
+  const settleMap = new WeakMap();   // mes_text 元素 -> { sig, since }
+
+  function messageSignature(textEl) {
+    let out = '';
+    try {
+      (function walk(n, depth) {
+        if (!n || depth > 60) return;
+        const kids = n.childNodes || n.children || [];
+        for (let i = 0; i < kids.length; i += 1) {
+          const c = kids[i];
+          if (!c) continue;
+          if (c.nodeType === 3) { out += c.nodeValue || ''; continue; }
+          if (c.nodeType !== 1) continue;
+          const raw = c.getAttribute ? c.getAttribute('data-lpic-raw') : null;
+          if (raw != null) { out += raw; continue; }    // 我们自己插的图：按原标记算，且不往里走
+          walk(c, depth + 1);
+        }
+      })(textEl, 0);
+    } catch (e) { /* ignore */ }
+    return out;
+  }
+
+  /** 正文是否已经「安静」下来了（安静够久才认为本次输出结束） */
+  function isSettled(textEl) {
+    const sig = messageSignature(textEl);
+    const rec = settleMap.get(textEl);
+    const now = Date.now();
+    if (!rec || rec.sig !== sig) {
+      settleMap.set(textEl, { sig: sig, since: now });
+      return false;
+    }
+    return (now - rec.since) >= STREAM_SETTLE_MS;
+  }
+
+  /** 正文里是否还有「等着被换成图」的标记（已经换好的不算，避免白白空转） */
+  function markerMaybePresent(textEl) {
+    try {
+      return buildRegex().test(textEl.textContent || '');
+    } catch (e) {
+      return false;
+    }
   }
 
   function replaceWithText(el, text) {
@@ -2124,10 +2177,20 @@
         if (role === 'system') return;
         if (role === 'user' && !settings.applyToUser) return;
       }
-      if (shouldDeferRender(force)) {   // 生成中先不动，避免图片闪烁（但有很短的时间上限；force 时完全不推迟）
-        state.dirty = true;
-        scheduleRetry();
-        return;
+      if (!force) {
+        if (shouldDeferRender()) {   // 生成中先不动（有很短的时间上限，避免万一卡住就永远不出图）
+          state.dirty = true;
+          scheduleRetry();
+          return;
+        }
+        // 流式输出保护：正文还在变就先别插 —— 否则会被酒馆的重绘反复冲掉，看着一直闪、还一直换图
+        if (markerMaybePresent(textEl) && !isSettled(textEl)) {
+          state.stats.skips += 1;
+          state.dirty = true;
+          scheduleScan(textEl);      // 过一会儿再看一眼，安静下来就插图
+          scheduleRetry();
+          return;
+        }
       }
       processRoot(textEl, getMesId(mesEl));
     } catch (e) {
@@ -2154,13 +2217,14 @@
   }
 
   /** 保命重扫：不管前面发生过什么（事件没来、状态卡住、别人重绘了消息），
-   *  最多 ASSURE_SCAN_MS 一定把该显示的图补回来。这是最后一道防线。 */
+   *  最多 ASSURE_SCAN_MS 一定把该显示的图补回来。这是最后一道防线。
+   *  注意这里不带 force：流式输出期间照样要守规矩，不然就成了「每 15 秒闪一下」。 */
   function startAssuranceScan() {
     if (state.assureTimer) return;
     state.assureTimer = setInterval(function () {
       try {
         if (!settings.enabled) return;
-        applyAll(true);
+        applyAll();
       } catch (e) { /* ignore */ }
     }, ASSURE_SCAN_MS);
   }
@@ -2581,7 +2645,8 @@
     lines.push('');
     lines.push('【渲染与事件】');
     lines.push('· 图片库连接：' + (state.dbReady ? '正常' : '未打开（正在自动重试）'));
-    lines.push('· 渲染统计：扫描 ' + state.stats.scans + ' 次 · 命中 ' + state.stats.hits + ' 处 · 失败 ' + state.stats.fails + ' 处');
+    lines.push('· 渲染统计：扫描 ' + state.stats.scans + ' 次 · 命中 ' + state.stats.hits + ' 处 · 失败 ' + state.stats.fails + ' 处'
+      + ' · 因输出未结束而等待 ' + state.stats.skips + ' 次');
     lines.push('· 生成标记：' + (state.generating
       ? ('是（已持续 ' + Math.round((Date.now() - (state.generatingSince || Date.now())) / 1000) + ' 秒）')
       : '否')
@@ -2707,11 +2772,16 @@
     document.addEventListener('keydown', onKeyDown);
   }
 
-  function scheduleScanAll() {
+  /** 全量重扫（合并成一次）。force=true 表示「现在已经确定不是在输出中」，可以立刻插图。
+   *  合并期间只要有一次是 force，整批就按 force 走。 */
+  function scheduleScanAll(force) {
+    if (force) state.scanAllForce = true;
     if (state.scanAllTimer) return;
     state.scanAllTimer = setTimeout(function () {
       state.scanAllTimer = 0;
-      applyAll();
+      const f = !!state.scanAllForce;
+      state.scanAllForce = false;
+      applyAll(f);
     }, 320);
   }
 
@@ -2784,7 +2854,8 @@
       state.deferSince = 0;
       state.dirty = false;
       state.retryCount = 0;
-      scheduleScanAll();
+      // 输出已结束，这时插图最合适：直接强制渲染一次，不用再等「安静」判定
+      scheduleScanAll(true);
     };
     on(et.GENERATION_ENDED, genEnd);
     on(et.GENERATION_STOPPED, genEnd);
