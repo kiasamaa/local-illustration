@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.6.1';
+  const VERSION = '1.7.0';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -78,6 +78,7 @@
     watchTimer: 0,
     mountTimer: 0,
     armClear: 0,
+    armMedia: 0,        // 素材清单里「再点一次删除」的计时器
     generating: false,
     generatingSince: 0, // 从什么时候开始处于生成中（用来识别卡死状态）
     deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
@@ -333,6 +334,7 @@
       + '      </div>'
       + '      <div class="' + PREFIX + 'status" id="' + PREFIX + 'status"></div>'
       + '      <div class="' + PREFIX + 'kw-head">关键词清单 <span id="' + PREFIX + 'kw-count">0</span></div>'
+      + '      <div class="' + PREFIX + 'hint">点关键词右侧的眼睛按钮可以展开它的素材清单：缩略图浏览、单个查看、单个删除。</div>'
       + '      <div class="' + PREFIX + 'kw-list" id="' + PREFIX + 'kw-list"></div>'
       + '    </div>'
 
@@ -892,6 +894,25 @@
           rq.onsuccess = function () { resolve(rq.result || null); };
           rq.onerror = function () { resolve(null); };
         } catch (e) { resolve(null); }
+      });
+    });
+  }
+
+  /** 删掉库里的一条记录（按主键） */
+  function dbDelete(store, key) {
+    return openDB().then(function (db) {
+      return new Promise(function (resolve) {
+        if (!db || key == null) { resolve(false); return; }
+        try {
+          const tx = db.transaction(store, 'readwrite');
+          tx.objectStore(store).delete(key);
+          tx.oncomplete = function () { resolve(true); };
+          tx.onerror = function () { warn('删除单条失败', tx.error); resolve(false); };
+          tx.onabort = function () { resolve(false); };
+        } catch (e) {
+          warn('删除单条异常', e);
+          resolve(false);
+        }
       });
     });
   }
@@ -1794,7 +1815,7 @@
         + '</div>'
         + '<div class="' + PREFIX + 'kw-acts">'
         + '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'mini-primary" data-lpic-act="kw-add" data-kw-id="' + id + '">' + icon('plus') + '加图/视频</button>'
-        + (n ? '<button class="' + PREFIX + 'icon-btn" title="试看一个" data-lpic-act="kw-preview" data-kw-id="' + id + '">' + icon('eye') + '</button>' : '')
+        + (n ? '<button class="' + PREFIX + 'icon-btn" title="查看素材清单" data-lpic-act="kw-list" data-kw-id="' + id + '">' + icon('eye') + '</button>' : '')
         + '<button class="' + PREFIX + 'icon-btn" title="改名" data-lpic-act="kw-rename" data-kw-id="' + id + '">' + icon('pen') + '</button>'
         + '<button class="' + PREFIX + 'icon-btn ' + PREFIX + 'icon-danger" title="删除" data-lpic-act="kw-del" data-kw-id="' + id + '">' + icon('trash') + '</button>'
         + '</div>'
@@ -1804,6 +1825,7 @@
         + '<button class="' + PREFIX + 'mini-btn" data-lpic-act="kw-edit-cancel" data-kw-id="' + id + '">取消</button>'
         + '</div>'
         + '<div class="' + PREFIX + 'kw-confirm" hidden></div>'
+        + '<div class="' + PREFIX + 'kw-media" hidden></div>'
         + '</div>';
     }).join('');
   }
@@ -2891,6 +2913,179 @@
     return (VID_EXT.indexOf(ext) >= 0) ? 'video' : 'img';
   }
 
+  /* ---- 素材清单：列出某个关键词下的全部素材，可逐个查看 / 删除 ---- */
+
+  const MEDIA_PAGE = 40;          // 一次先铺多少个缩略图
+  const mediaShown = new Map();   // kwId -> 当前已铺开多少条
+
+  function mediaBox(kwId) {
+    const row = kwRow(kwId);
+    return row ? row.querySelector('.' + PREFIX + 'kw-media') : null;
+  }
+
+  function closeMediaList(kwId) {
+    const box = mediaBox(kwId);
+    mediaShown.delete(kwId);
+    if (!box) return;
+    box.hidden = true;
+    box.innerHTML = '';
+  }
+
+  function toggleMediaList(kwId) {
+    const box = mediaBox(kwId);
+    if (!box) return;
+    if (!box.hidden) { closeMediaList(kwId); return; }   // 再点一次就收起
+    closeRowPanels(kwId);                                // 先关掉同一行里的改名 / 删除确认
+    mediaShown.set(kwId, MEDIA_PAGE);
+    renderMediaList(kwId);
+    box.hidden = false;
+  }
+
+  function renderMediaList(kwId) {
+    const box = mediaBox(kwId);
+    if (!box) return;
+    const paths = pathsOfKeyword(kwId);
+    const k = getKeyword(kwId);
+    if (!paths.length) {
+      box.innerHTML = '<div class="' + PREFIX + 'kw-empty">这个关键词下还没有素材。用「加图/视频」加一些吧。</div>';
+      return;
+    }
+    const show = Math.min(mediaShown.get(kwId) || MEDIA_PAGE, paths.length);
+
+    let html = '<div class="' + PREFIX + 'media-head">'
+      + '<span>' + esc(k ? k.name : '') + ' · 共 ' + paths.length + ' 个素材</span>'
+      + '<button class="' + PREFIX + 'mini-btn" data-lpic-act="media-rand" data-kw-id="' + esc(kwId) + '">随机看一个</button>'
+      + '</div>'
+      + '<div class="' + PREFIX + 'media-grid">';
+    for (let i = 0; i < show; i += 1) {
+      const p = paths[i];
+      const isV = (pathKind(p) === 'video');
+      html += '<div class="' + PREFIX + 'media-cell" data-lpic-act="media-open" data-path="' + esc(p) + '">'
+        + '<span class="' + PREFIX + 'media-thumb"></span>'
+        + '<span class="' + PREFIX + 'media-del" data-lpic-act="media-del" data-path="' + esc(p)
+        + '" data-kw-id="' + esc(kwId) + '" role="button" aria-label="删除这个素材">' + icon('close') + '</span>'
+        + (isV ? '<span class="' + PREFIX + 'media-tag">视频</span>' : '')
+        + '</div>';
+    }
+    html += '</div>';
+    if (paths.length > show) {
+      html += '<button class="' + PREFIX + 'mini-btn ' + PREFIX + 'media-more" data-lpic-act="media-more" data-kw-id="' + esc(kwId) + '">'
+        + '再看更多（还有 ' + (paths.length - show) + ' 个）</button>';
+    }
+    html += '<div class="' + PREFIX + 'hint">点缩略图看大图；点角上的 × 删除这一个（会再确认一次）。删掉的只是插件里的记录，原始文件不会被删。</div>';
+    box.innerHTML = html;
+    fillMediaThumbs(box, paths.slice(0, show));
+  }
+
+  /** 分批读缩略图：一次铺几十个会把手机卡住，所以每 6 个让出一次 */
+  async function fillMediaThumbs(box, paths) {
+    let cells;
+    try {
+      cells = Array.prototype.slice.call(box.querySelectorAll('.' + PREFIX + 'media-thumb'));
+    } catch (e) {
+      return;
+    }
+    for (let i = 0; i < cells.length && i < paths.length; i += 1) {
+      const cell = cells[i];
+      const p = paths[i];
+      if (!cell || !cell.isConnected) continue;
+      try {
+        const url = await getUrl(p);
+        if (!url || !cell.isConnected) continue;
+        let el;
+        if (pathKind(p) === 'video') {
+          el = document.createElement('video');
+          el.className = PREFIX + 'media-v';
+          el.preload = 'metadata';          // 清单里只取首帧
+          el.muted = true;
+          el.setAttribute('playsinline', '');
+          el.setAttribute('muted', '');
+          try { el.playsInline = true; } catch (e2) { /* ignore */ }
+        } else {
+          el = document.createElement('img');
+          el.className = PREFIX + 'media-i';
+          el.alt = '';
+          el.decoding = 'async';
+        }
+        el.src = url;
+        cell.appendChild(el);
+      } catch (e) { /* 单个失败不影响其它 */ }
+      if (i % 6 === 5) await yieldToUI();
+    }
+  }
+
+  function openMediaItem(hit) {
+    const path = hit && hit.getAttribute ? (hit.getAttribute('data-path') || '') : '';
+    if (!path) return;
+    getUrl(path).then(function (url) {
+      if (url) openLightbox(url, '', pathKind(path));
+      else setStatus('素材读取失败：' + path, 'err');
+    });
+  }
+
+  function disarmMediaCell(cell) {
+    if (!cell) return;
+    cell.classList.remove(PREFIX + 'armed');
+    const btn = cell.querySelector('.' + PREFIX + 'media-del');
+    if (btn) btn.innerHTML = icon('close');
+    const tip = cell.querySelector('.' + PREFIX + 'media-tip');
+    if (tip && tip.parentNode) tip.parentNode.removeChild(tip);
+  }
+
+  /** 点 × 一次变成「再点一次确认」，避免误删 */
+  function armDeleteMedia(btn) {
+    const cell = btn && btn.closest ? btn.closest('.' + PREFIX + 'media-cell') : null;
+    if (!cell) return;
+    if (cell.classList.contains(PREFIX + 'armed')) {
+      deleteMediaItem(btn.getAttribute('data-path') || '', btn.getAttribute('data-kw-id') || '');
+      return;
+    }
+    cell.classList.add(PREFIX + 'armed');
+    btn.innerHTML = icon('trash');
+    const tip = document.createElement('span');
+    tip.className = PREFIX + 'media-tip';
+    tip.textContent = '再点一次删除';
+    cell.appendChild(tip);
+    if (state.armMedia) clearTimeout(state.armMedia);
+    state.armMedia = setTimeout(function () {
+      state.armMedia = 0;
+      disarmMediaCell(cell);
+    }, 4000);
+  }
+
+  /** 从库里删掉单个素材（连同清单里的位置、画面上的显示一起收拾干净） */
+  async function deleteMediaItem(path, kwId) {
+    if (!path) return;
+    try {
+      await dbDelete(STORE_FILES, path);
+      indexList = indexList.filter(function (r) { return r && r.path !== path; });
+      await saveIndex();
+
+      if (urlCache.has(path)) {
+        try { URL.revokeObjectURL(urlCache.get(path)); } catch (e) { /* ignore */ }
+        urlCache.delete(path);
+      }
+      pinned.forEach(function (v, kk) { if (v === path) pinned.delete(kk); });
+
+      buildIndex();
+      updateStats();
+      rebuildRendered(false);          // 画面里若正显示它，会换成同关键词的另一个（没有就还原成文字）
+
+      const k = getKeyword(kwId);
+      const left = k ? kwTotal(kwId) : 0;
+      setStatus('已删除 1 个素材' + (k ? ('（「' + k.name + '」还剩 ' + left + ' 个）') : '') + '，原始文件没有被删', 'ok');
+      log('删除素材：' + path);
+
+      // 清单保持打开，接着管
+      if (!left) { closeMediaList(kwId); return; }
+      const box = mediaBox(kwId);
+      if (box) { box.hidden = false; renderMediaList(kwId); }
+    } catch (e) {
+      warn('删除素材失败', e);
+      setStatus('删除失败：' + (e && e.message ? e.message : e), 'err');
+    }
+  }
+
   /** 试看：随机抽一个素材，图片直接放大、视频用播放器打开 */
   function previewKeywordById(id) {
     const k = getKeyword(id);
@@ -2922,7 +3117,15 @@
       case 'kw-new-cancel': closeNewKeywordRow(); break;
       case 'kw-new-ok': createKeywordFromUI(); break;
       case 'kw-add': importFlow(id); break;
+      case 'kw-list': toggleMediaList(id); break;
       case 'kw-preview': previewKeywordById(id); break;
+      case 'media-open': openMediaItem(btn); break;
+      case 'media-del': armDeleteMedia(btn); break;
+      case 'media-rand': previewKeywordById(id); break;
+      case 'media-more':
+        mediaShown.set(id, (mediaShown.get(id) || MEDIA_PAGE) + MEDIA_PAGE);
+        renderMediaList(id);
+        break;
       case 'kw-rename': openRenameRow(id); break;
       case 'kw-rename-ok': confirmRename(id); break;
       case 'kw-edit-cancel': closeRowPanels(id); break;
