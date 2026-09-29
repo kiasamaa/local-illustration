@@ -18,7 +18,7 @@
 
   const PLUGIN_ID = 'local-illustration';
   const PREFIX = 'lpic-';
-  const VERSION = '1.6.0';
+  const VERSION = '1.6.1';
   const LS_KEY = 'lpic_settings';
 
   const DB_NAME = 'lpic-db';
@@ -83,6 +83,7 @@
     deferSince: 0,      // 从什么时候开始因为「生成中」而推迟渲染
     assureTimer: 0,
     scanAllForce: false, // 下一次全量重扫是否按「确定不在输出中」处理
+    lastStorage: null,   // 最近一次存储用量查询结果（诊断信息里用）
     failTimer: 0,
     failRetries: 0,
     dbReady: false,
@@ -385,6 +386,12 @@
       + '      <div class="' + PREFIX + 'group-title">数据</div>'
       + '      <div class="' + PREFIX + 'hint">导入的素材只保存在本机浏览器数据库里，不上传、不联网。清除浏览器数据、换设备或卸载扩展都会丢失，请保留原始文件。'
       + '<br>视频比图片大得多，而浏览器本地库容量有限：放几十个大视频可能装不下，建议只放短片段。</div>'
+      + '      <div class="' + PREFIX + 'example" id="' + PREFIX + 'store">本机占用：查询中…</div>'
+      + '      <div class="' + PREFIX + 'btn-row">'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="store-refresh">刷新占用</button>'
+      + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost" data-lpic-act="store-persist">申请持久保存</button>'
+      + '      </div>'
+      + '      <div class="' + PREFIX + 'hint">「申请持久保存」是向系统申请不被自动清理：磁盘紧张时浏览器会优先清掉这类数据。申请被拒也不影响使用，只是要多留意保留原文件。</div>'
       + '      <div class="' + PREFIX + 'btn-row">'
       + '        <button class="' + PREFIX + 'btn ' + PREFIX + 'btn-ghost ' + PREFIX + 'btn-danger" data-lpic-act="clear">' + icon('trash') + '清空图片库</button>'
       + '      </div>'
@@ -677,6 +684,12 @@
       case 'logs':
         showRecentLogs();
         break;
+      case 'store-refresh':
+        refreshStorageInfo(true);
+        break;
+      case 'store-persist':
+        requestPersist();
+        break;
       case 'cancel-pick':
         // 自助解锁：无论选择器那边发生什么，点这一下立刻恢复可用
         if (typeof state.cancelPick === 'function') {
@@ -965,7 +978,8 @@
     const n = Number(bytes) || 0;
     if (n < 1024) return n + ' B';
     if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1024 / 1024).toFixed(2) + ' MB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(2) + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
   }
 
   /* ======================= 五、导入与关键词索引 ======================= */
@@ -1735,7 +1749,8 @@
   function updateStats() {
     const total = indexList.length;
     const kwCount = keywordList.length;
-    renderSummary();     // 收起状态下的一行摘要也要跟着更新
+    renderSummary();               // 收起状态下的一行摘要也要跟着更新
+    refreshStorageInfo(false);     // 素材有增减时顺带更新「本机占用」（空库时也要刷新，否则会一直停在「查询中」）
     if (!total && !kwCount) {
       setStatus('还没有关键词。先点上面的「新建关键词」建一个（比如「挠头」），再点它的「加图/视频」按钮导入素材');
       renderKeywordList();
@@ -2029,6 +2044,99 @@
       warn('清空图片库失败', e);
       setStatus('清空失败：' + (e && e.message ? e.message : e), 'err');
     }
+  }
+
+  /* ---- 本机存储用量与「持久保存」申请 ----
+   * 浏览器给网页的存储配额是按设备剩余空间动态算的（Chrome 系上限约为总容量的 60%），
+   * 光看这个数字意义不大，真正要看的是「已经用了多少」。另外磁盘紧张时浏览器会
+   * 自动清理这类数据，IndexedDB 还是优先被清的对象 —— 所以这里提供申请持久保存的入口。 */
+
+  function queryStorageEstimate() {
+    return new Promise(function (resolve) {
+      try {
+        const st = window.navigator && window.navigator.storage;
+        if (!st || typeof st.estimate !== 'function') { resolve(null); return; }
+        st.estimate().then(function (est) {
+          resolve(est ? { usage: Number(est.usage) || 0, quota: Number(est.quota) || 0 } : null);
+        }).catch(function () { resolve(null); });
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  function queryPersisted() {
+    return new Promise(function (resolve) {
+      try {
+        const st = window.navigator && window.navigator.storage;
+        if (!st || typeof st.persisted !== 'function') { resolve(null); return; }
+        st.persisted().then(function (v) { resolve(!!v); }).catch(function () { resolve(null); });
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  /** 刷新「本机占用」那一行（quiet=true 表示不打断用户，只更新文字） */
+  async function refreshStorageInfo(quiet) {
+    const el = document.getElementById(PREFIX + 'store');
+    if (!el) return;
+    let ownBytes = 0;
+    for (let i = 0; i < indexList.length; i += 1) ownBytes += Number(indexList[i].size) || 0;
+
+    const est = await queryStorageEstimate();
+    if (!est || !est.quota) {
+      el.textContent = '本机占用：插件素材 ' + fmtSize(ownBytes) + ' · 本机不支持查询总配额（不影响使用）';
+      state.lastStorage = { ownBytes: ownBytes, usage: est ? est.usage : 0, quota: 0, persisted: null, ts: Date.now() };
+      if (quiet) setStatus('已刷新：本机不支持查询总配额', 'ok');
+      return;
+    }
+
+    const persisted = await queryPersisted();
+    state.lastStorage = {
+      ownBytes: ownBytes,
+      usage: est.usage,
+      quota: est.quota,
+      persisted: persisted,
+      ts: Date.now(),
+    };
+    let text = '本机占用：插件素材 ' + fmtSize(ownBytes)
+      + ' · 本机已用 ' + fmtSize(est.usage) + ' / 配额约 ' + fmtSize(est.quota);
+    if (persisted === true) text += ' · 已持久保存';
+    else if (persisted === false) text += ' · 未持久保存';
+    el.textContent = text;
+
+    if (quiet) {
+      setStatus('已刷新：本机已用 ' + fmtSize(est.usage) + '，配额约 ' + fmtSize(est.quota), 'ok');
+    }
+  }
+
+  /** 申请持久保存：磁盘紧张时不被系统优先清理 */
+  async function requestPersist() {
+    const st = window.navigator && window.navigator.storage;
+    if (!st || typeof st.persist !== 'function') {
+      setStatus('本机不支持申请持久保存（不影响正常使用）', 'err');
+      await refreshStorageInfo(false);
+      return;
+    }
+    try {
+      const already = await queryPersisted();
+      if (already === true) {
+        setStatus('已经是持久保存状态，无需重复申请', 'ok');
+        await refreshStorageInfo(false);
+        return;
+      }
+      const granted = await st.persist();
+      setStatus(granted
+        ? '已获得持久保存：系统清理空间时不会优先动插件数据'
+        : '未获得持久保存：本机拒绝了申请（常见于没有把酒馆装成应用/加到主屏幕）。功能不受影响，但请保留原始文件。',
+        granted ? 'ok' : 'err');
+      log('持久保存申请结果：' + granted);
+    } catch (e) {
+      warn('申请持久保存失败', e);
+      setStatus('申请持久保存失败：' + (e && e.message ? e.message : e), 'err');
+    }
+    await refreshStorageInfo(false);
   }
 
   /* ======================= 六、渲染替换（核心） =======================
@@ -2972,6 +3080,12 @@
     }
     lines.push('· 关键词 ' + keywordList.length + ' 个 / 图片 ' + (indexList.length - vidsInLib) + ' 张'
       + (vidsInLib ? (' / 视频 ' + vidsInLib + ' 个') : ''));
+    const ls2 = state.lastStorage;
+    if (ls2) {
+      lines.push('· 本机占用：插件素材 ' + fmtSize(ls2.ownBytes) + ' / 本机已用 ' + fmtSize(ls2.usage)
+        + (ls2.quota ? (' / 配额约 ' + fmtSize(ls2.quota)) : '')
+        + (ls2.persisted === true ? ' · 已持久保存' : (ls2.persisted === false ? ' · 未持久保存' : '')));
+    }
     lines.push('· IndexedDB 可用：' + (!!window.indexedDB ? '是' : '否'));
     lines.push('· 酒馆事件系统可用：' + ((getEventSource() && getEventTypes()) ? '是' : '否'));
     lines.push('· 文件夹导入：' + (state.dirPickerBlocked
